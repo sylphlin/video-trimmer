@@ -84,12 +84,34 @@ echo 'GEMINI_API_KEY="你的_GEMINI_API_KEY"' >> ~/.gemini/.env
 python auto_rough_cut.py --input "/path/to/your_video.mp4"
 ```
 
-### 常用參數
+### 雙剪輯節奏風格支援 (`--pacing`)
+
+系統支援依講者語速與內容屬性自由切換兩種剪輯節奏：
+
+* **`compact`（緊湊減法模式，預設）**：
+  * 適用：泛科學新聞、快節奏科普短影音、高密度口播。
+  * 特色：落音即切（+0.06s）、開口微氣息（-0.06s），段落間隔約 **0.15 ~ 0.25 秒**，一氣呵成。
+* **`breathing`（呼吸空間模式）**：
+  * 適用：工頭堅、文化歷史、慢說書、深度人物訪談、紀錄片。
+  * 特色：保留開口前自然吸氣與眼神定格（-0.28s）、句尾留白沉澱餘韻（+0.45s），段落間隔約 **0.70 ~ 1.00 秒**，完整保護慢語速字音與微表情，避免話音未落即硬切的突兀感。
+
+### 常用指令範例
+
+```bash
+# 1. 緊湊減法模式 (泛科學新聞快節奏)
+python auto_rough_cut.py --input "take 2_1080p.mp4" --pacing compact
+
+# 2. 呼吸空間模式 (工頭堅文化漫談慢節奏)
+python auto_rough_cut.py --input "工頭堅/take 1_1080p.mp4" --pacing breathing
+```
+
+### 完整參數說明
 
 ```bash
 python auto_rough_cut.py \
-  --input "take 2_1080p.mp4" \       # 輸入影片路徑 (必填)
+  --input "video.mp4" \              # 輸入影片路徑 (必填)
   --output-dir "./output" \          # 輸出資料夾 (預設為影片所在同目錄)
+  --pacing breathing \               # 節奏風格: 'compact' (預設) 或 'breathing'
   --model "gemini-3.8-flash" \       # 指定模型 (預設 gemini-3.8-flash)
   --crf 18                           # 渲染畫質參數 (CRF 18 為視覺無損)
 ```
