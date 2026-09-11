@@ -105,9 +105,9 @@ def resolve_timestamp(raw_val, total_dur):
 
 
 def refine_speech_bounds(audio, sr, s_in, s_out, total_dur):
-    """透過音訊 RMS 能量回溯掃描，精確定位字音起訖點並套用緊湊減法"""
-    start_t = max(0.0, s_in - 1.0)
-    end_t = min(total_dur, s_out + 1.0)
+    """透過音訊 RMS 能量回溯掃描，精確定位字音起訖點並套用緊湊減法，同時自動濾除拍手/打板雜音"""
+    start_t = max(0.0, s_in - 0.5)
+    end_t = min(total_dur, s_out + 0.5)
     
     seg = audio[int(start_t * sr):int(end_t * sr)]
     win_len = int(0.02 * sr)  # 20ms
@@ -116,7 +116,16 @@ def refine_speech_bounds(audio, sr, s_in, s_out, total_dur):
     rms_vals = [np.sqrt(np.mean(seg[i:i + win_len] ** 2)) for i in range(0, len(seg) - win_len, hop_len)]
     t_vals = [start_t + i * 0.005 for i in range(len(rms_vals))]
     
-    speech_times = [t for t, r in zip(t_vals, rms_vals) if r > 0.03]
+    # 尋找真正連續語音，跳過孤立拍手脈衝（拍手特徵：極短脈衝且後方跟隨 >250ms 寂靜）
+    speech_times = []
+    for idx, (t, r) in enumerate(zip(t_vals, rms_vals)):
+        if r > 0.03:
+            # 檢查開頭是否有拍手/打板 (若後方 250ms 內能量皆低於 0.015，則為孤立拍手，予以忽略)
+            future_rms = rms_vals[idx + 1:idx + 50]  # 50 * 5ms = 250ms
+            if len(future_rms) >= 20 and max(future_rms) < 0.015:
+                continue
+            speech_times.append(t)
+            
     if speech_times:
         true_onset = speech_times[0]
         true_offset = speech_times[-1]
@@ -124,9 +133,9 @@ def refine_speech_bounds(audio, sr, s_in, s_out, total_dur):
         true_onset = s_in
         true_offset = s_out
         
-    # 緊湊下刀：開口前 0.09s 微呼吸，句尾落音後 0.08s 俐落切斷
-    compact_in = max(0.0, true_onset - 0.09)
-    compact_out = min(total_dur, true_offset + 0.08)
+    # 緊湊下刀：開口前 0.06s 微呼吸，句尾落音後 0.06s 俐落切斷
+    compact_in = max(0.0, true_onset - 0.06)
+    compact_out = min(total_dur, true_offset + 0.06)
     return round(compact_in, 2), round(compact_out, 2)
 
 
