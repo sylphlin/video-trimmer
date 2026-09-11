@@ -293,28 +293,60 @@ def align_clip_with_whisper(whisper_segs, clip_data, total_dur):
     return cand_segs[0]["start"], cand_segs[-1]["end"]
 
 
+def compute_dynamic_margins(cps, pacing="auto"):
+    """
+    依據語速 CPS (字/秒) 動態計算自然呼吸與收口留白：
+    - 快語速 (CPS >= 5.5，如泛科學 6.0~8.0 字/秒)：
+      In 留白 0.06s 微氣息，Out 留白 0.12s 俐落定格（緊湊有勁，無冷場拖沓）
+    - 慢語速 (CPS <= 3.0，如工頭堅 2.5~3.0 字/秒)：
+      In 留白 0.15s 定神氣息，Out 留白 0.28s 表情餘韻（沉穩舒緩）
+    - 中間語速：連續線性插值
+    """
+    if pacing == "compact":
+        return 0.06, 0.10
+    elif pacing == "breathing":
+        return 0.25, 0.35
+
+    if cps >= 5.5:
+        in_m = 0.06
+        out_m = 0.12
+    elif cps <= 3.0:
+        in_m = 0.15
+        out_m = 0.28
+    else:
+        alpha = (cps - 3.0) / (5.5 - 3.0)
+        in_m = 0.15 - alpha * (0.15 - 0.06)
+        out_m = 0.28 - alpha * (0.28 - 0.12)
+    return round(in_m, 2), round(out_m, 2)
+
+
 def refine_speech_bounds_locked(audio, sr, t_first, t_last, total_dur, transcript="", pacing="auto"):
     """
     文字剪輯時間鎖定標準 (Text-Based Locked Time Standard):
     - 嚴格尊重 Whisper 物理發音時間戳，絕不提前切斷字尾！
-    - 開頭：保留 0.12s 前置呼吸氣息，但以開拍前拍手打板點為絕對硬防護阻斷 (Physical Clap Guard)。
-    - 結尾：在最後一個字發音結束後，保留 0.25s 俐落自然閉口定格，流暢緊湊不拖沓。
+    - 依據 CPS 連續動態分配呼吸氣息與閉口留白 (快語速緊湊 0.06/0.12s，慢語速舒緩 0.15/0.28s)
+    - 開頭：保留動態前置呼吸氣息，但以開拍前拍手打板點為絕對硬防護阻斷 (Physical Clap Guard)。
+    - 結尾：在最後一個字發音結束後，保留動態俐落自然閉口定格，流暢緊湊不拖沓。
     """
     # 1. 偵測開拍前之拍手打板脈衝
     claps = detect_pre_speech_claps(audio, t_first, search_before=2.5, search_after=1.5, sr=sr)
     last_clap = max(claps) if claps else None
 
-    # 2. 句首下刀點 (氣息留白，拍手防護)
-    if last_clap is not None and last_clap < t_first:
-        final_in = max(last_clap + 0.10, t_first - 0.12)
-    else:
-        final_in = max(0.0, t_first - 0.12)
+    # 2. 計算片段語速 (CPS) 與自適應動態留白
+    raw_dur = max(0.5, t_last - t_first)
+    cps, _ = calculate_clip_cps(transcript, raw_dur)
+    in_margin, out_margin = compute_dynamic_margins(cps, pacing)
 
-    # 3. 句尾下刀點 (俐落收口定格)
-    # 檢查 t_last 後方是否突然有工作人員喊卡或拍手
-    max_out = min(total_dur, t_last + 0.25)
+    # 3. 句首下刀點 (氣息留白，拍手防護)
+    if last_clap is not None and last_clap < t_first:
+        final_in = max(last_clap + 0.10, t_first - in_margin)
+    else:
+        final_in = max(0.0, t_first - in_margin)
+
+    # 4. 句尾下刀點 (動態俐落收口定格)
+    max_out = min(total_dur, t_last + out_margin)
     win_len = int(0.02 * sr)
-    t = t_last + 0.05
+    t = t_last + 0.03
     final_out = max_out
 
     while t < max_out:
@@ -326,12 +358,10 @@ def refine_speech_bounds_locked(audio, sr, t_first, t_last, total_dur, transcrip
         rms = np.sqrt(np.mean(frame**2))
         # 僅在偵測到極大能量突發（外人搶話/拍手）時提前停止
         if peak > 0.25 or rms > 0.040:
-            final_out = max(t_last + 0.05, t - 0.03)
+            final_out = max(t_last + 0.03, t - 0.03)
             break
         t += 0.005
 
-    raw_dur = max(0.5, final_out - final_in)
-    cps, _ = calculate_clip_cps(transcript, raw_dur)
     in_m = round(t_first - final_in, 2)
     out_m = round(final_out - t_last, 2)
 
@@ -557,6 +587,8 @@ def main():
         client = genai.Client()
 
         prompt_file = Path(__file__).parent / "prompts" / "video_cut_prompt.md"
+        if not prompt_file.exists():
+            prompt_file = Path(__file__).parent / "pansci-ai-rough-cut" / "prompts" / "video_cut_prompt.md"
         if prompt_file.exists():
             prompt = prompt_file.read_text(encoding="utf-8")
         else:
