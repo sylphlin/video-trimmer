@@ -76,6 +76,30 @@ def mmss_to_sec(val):
     return m * 60 + s
 
 
+def resolve_timestamp(raw_val, audio, sr, total_dur):
+    """
+    智能判定時間戳：比對 raw_val 與 mmss_to_sec 轉換值，若 raw 超過總長直接轉換；
+    若兩者皆在時長內，比對該時間點附近的語音能量 (RMS)，自動選擇語音更明確的時間戳。
+    """
+    if raw_val > total_dur:
+        return mmss_to_sec(raw_val)
+    
+    # 若大於 100 且個位十位小於 60，有可能是 mm*100+ss
+    if raw_val >= 100 and (int(raw_val) % 100 < 60):
+        converted = mmss_to_sec(raw_val)
+        if converted < total_dur:
+            def get_rms(t):
+                s = max(0, int((t - 0.1) * sr))
+                e = min(len(audio), int((t + 0.8) * sr))
+                if e <= s: return 0.0
+                return float(np.sqrt(np.mean(audio[s:e] ** 2)))
+            rms_raw = get_rms(raw_val)
+            rms_conv = get_rms(converted)
+            if rms_conv > 0.025 and rms_conv > rms_raw * 1.5:
+                return converted
+    return raw_val
+
+
 def refine_speech_bounds(audio, sr, s_in, s_out, total_dur):
     """透過音訊 RMS 能量回溯掃描，精確定位字音起訖點並套用緊湊減法"""
     start_t = max(0.0, s_in - 1.0)
@@ -376,9 +400,9 @@ def main():
     for c in model_edl.get("final_edl", []):
         raw_in = c["source_in"]
         raw_out = c["source_out"]
-        # 若時間戳大於總片長或呈現 mm*100+ss 格式，自動轉換
-        s_in = mmss_to_sec(raw_in) if raw_in > total_dur or (raw_in > 60 and (raw_in % 100 < 60)) else raw_in
-        s_out = mmss_to_sec(raw_out) if raw_out > total_dur or (raw_out > 60 and (raw_out % 100 < 60)) else raw_out
+        # 智能解析時間戳 (自動比對 raw 秒數與 mm:ss 換算之能量)
+        s_in = resolve_timestamp(raw_in, audio, sr, total_dur)
+        s_out = resolve_timestamp(raw_out, audio, sr, total_dur)
 
         tight_in, tight_out = refine_speech_bounds(audio, sr, s_in, s_out, total_dur)
         dur = round(tight_out - tight_in, 2)
