@@ -104,53 +104,94 @@ def resolve_timestamp(raw_val, total_dur):
     return raw_val
 
 
+def detect_pre_speech_claps(audio_full, s_in, search_before=2.5, search_after=2.0, sr=16000):
+    """
+    精確偵測開拍打板拍手聲（物理特徵：超短瞬態衝擊波 peak>0.25，
+    在 60ms 內快速衰減，且後方伴隨 >350ms 之純寂靜準備空檔）。
+    返回所有拍手發生之絕對秒數。
+    """
+    start_t = max(0.0, s_in - search_before)
+    end_t = min(len(audio_full) / sr, s_in + search_after)
+    audio_seg = audio_full[int(start_t * sr): int(end_t * sr)]
+
+    win_30ms = int(0.03 * sr)
+    step = int(0.005 * sr)
+    claps = []
+
+    silence_len = int(0.35 * sr)
+    limit = len(audio_seg) - (int(0.08 * sr) + silence_len)
+
+    for i in range(0, max(0, limit), step):
+        w1 = audio_seg[i : i + win_30ms]
+        peak1 = np.max(np.abs(w1))
+        if peak1 > 0.25:
+            w_decay = audio_seg[i + int(0.05 * sr) : i + int(0.08 * sr)]
+            rms_decay = np.sqrt(np.mean(w_decay**2)) if len(w_decay) > 0 else 0
+
+            w_silence = audio_seg[i + int(0.08 * sr) : i + int(0.08 * sr) + silence_len]
+            rms_silence = np.sqrt(np.mean(w_silence**2)) if len(w_silence) > 0 else 0
+
+            # 拍手物理判據：急速衰減且後方持續 >350ms 寂靜
+            if rms_decay < 0.030 and rms_silence < 0.012:
+                t = start_t + i / sr
+                if not claps or t - claps[-1] > 0.5:
+                    claps.append(round(t, 2))
+    return claps
+
+
 def refine_speech_bounds(audio, sr, s_in, s_out, total_dur, pacing="compact"):
     """
-    透過音訊 RMS 能量回溯掃描，精確定位字音起訖點，自動濾除拍手/打板雜音，
-    並依據 pacing 風格模式設定起迄留白裕度：
-    - 'compact': 緊湊減法模式（開口前 0.06s，落音後 0.06s，相鄰停頓 ~0.20s）
-    - 'breathing': 呼吸空間模式（開口前 0.28s，落音後 0.45s，相鄰停頓 ~0.70s）
+    透過音訊 RMS 能量回溯掃描，精確定位字音起訖點，
+    強制建立「拍手打板防護牆（Clap Hard Barrier）」，保證絕對不剪入任何拍手雜音。
     """
-    head_search = 1.0 if pacing == "breathing" else 0.5
-    tail_search = 1.0 if pacing == "breathing" else 0.5
-    start_t = max(0.0, s_in - head_search)
-    end_t = min(total_dur, s_out + tail_search)
-    
+    # 1. 偵測開拍前之拍手打板脈衝
+    claps = detect_pre_speech_claps(audio, s_in, search_before=2.5, search_after=2.0, sr=sr)
+    last_clap = max(claps) if claps else None
+
+    # 2. 語音能量回溯掃描
+    start_t = max(0.0, s_in - 2.5)
+    end_t = min(total_dur, s_out + 1.0)
     seg = audio[int(start_t * sr):int(end_t * sr)]
     win_len = int(0.02 * sr)  # 20ms
     hop_len = int(0.005 * sr) # 5ms
-    
+
     rms_vals = [np.sqrt(np.mean(seg[i:i + win_len] ** 2)) for i in range(0, len(seg) - win_len, hop_len)]
     t_vals = [start_t + i * 0.005 for i in range(len(rms_vals))]
-    
+
     threshold = 0.020 if pacing == "breathing" else 0.030
-    
-    # 尋找真正連續語音，跳過孤立拍手脈衝（拍手特徵：極短脈衝且後方跟隨 >250ms 寂靜）
+
+    # 尋找真正人聲起訖點（必須嚴格位於最後一記拍手之後）
     speech_times = []
-    for idx, (t, r) in enumerate(zip(t_vals, rms_vals)):
+    for t, r in zip(t_vals, rms_vals):
+        if last_clap is not None and t < last_clap + 0.20:
+            continue
         if r > threshold:
-            # 檢查開頭是否有拍手/打板 (若後方 250ms 內能量皆低於 0.015，則為孤立拍手，予以忽略)
-            future_rms = rms_vals[idx + 1:idx + 50]  # 50 * 5ms = 250ms
-            if len(future_rms) >= 20 and max(future_rms) < 0.015:
-                continue
             speech_times.append(t)
-            
+
     if speech_times:
         true_onset = speech_times[0]
         true_offset = speech_times[-1]
     else:
         true_onset = s_in
         true_offset = s_out
-        
+
     if pacing == "breathing":
-        # 呼吸空間：開口前 0.28s 氣息與眼神就位，句尾落音後 0.45s 從容餘韻
-        compact_in = max(0.0, true_onset - 0.28)
+        # 呼吸空間模式：開口前 0.35s 乾淨氣息，但絕對不跨越拍手禁區 (last_clap + 0.35s)
+        raw_in = true_onset - 0.35
+        if last_clap is not None:
+            compact_in = max(last_clap + 0.35, raw_in)
+        else:
+            compact_in = max(0.0, raw_in)
         compact_out = min(total_dur, true_offset + 0.45)
     else:
-        # 緊湊下刀：開口前 0.06s 微呼吸，句尾落音後 0.06s 俐落切斷
-        compact_in = max(0.0, true_onset - 0.06)
+        # 緊湊減法模式：開口前 0.06s，且嚴禁拍手
+        raw_in = true_onset - 0.06
+        if last_clap is not None:
+            compact_in = max(last_clap + 0.15, raw_in)
+        else:
+            compact_in = max(0.0, raw_in)
         compact_out = min(total_dur, true_offset + 0.06)
-        
+
     return round(compact_in, 2), round(compact_out, 2)
 
 
