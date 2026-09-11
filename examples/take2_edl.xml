@@ -1,0 +1,590 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="4">
+  <project>
+    <name>AI_UltraCompactCut_Take2</name>
+    <children>
+      <sequence id="sequence-1">
+        <name>Take2_Final_Cut</name>
+        <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+        <media>
+          <video>
+            <format>
+              <samplecharacteristics>
+                <width>1920</width>
+                <height>1080</height>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+              </samplecharacteristics>
+            </format>
+            <track>
+              <clipitem id="clipitem-v1">
+                <name>Clip_1_開場：台灣深山巨木現身</name>
+                <duration>62</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>978</in>
+                <out>1040</out>
+                <start>0</start>
+                <end>62</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v2">
+                <name>Clip_2_找巨木的難題與傳統盲點</name>
+                <duration>272</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>1446</in>
+                <out>1718</out>
+                <start>62</start>
+                <end>334</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v3">
+                <name>Clip_3_空載光達（LiDAR）技術調查</name>
+                <duration>334</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>3134</in>
+                <out>3468</out>
+                <start>334</start>
+                <end>668</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v4">
+                <name>Clip_4_演算法初篩結果</name>
+                <duration>144</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>4008</in>
+                <out>4152</out>
+                <start>668</start>
+                <end>812</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v5">
+                <name>Clip_5_轉折：數據異常與地形誤差</name>
+                <duration>32</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>4614</in>
+                <out>4646</out>
+                <start>812</start>
+                <end>844</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v6">
+                <name>Clip_6_演算法誤差原因：陡坡與樹基誤判</name>
+                <duration>368</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>5541</in>
+                <out>5909</out>
+                <start>844</start>
+                <end>1212</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v7">
+                <name>Clip_7_白忙一場的荒謬感</name>
+                <duration>211</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>6841</in>
+                <out>7052</out>
+                <start>1212</start>
+                <end>1423</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v8">
+                <name>Clip_8_過渡轉折：人眼的優勢</name>
+                <duration>50</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>7589</in>
+                <out>7639</out>
+                <start>1423</start>
+                <end>1473</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v9">
+                <name>Clip_9_公民科學家群眾外包計畫</name>
+                <duration>518</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>8016</in>
+                <out>8534</out>
+                <start>1473</start>
+                <end>1991</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v10">
+                <name>Clip_10_點雲分析與巨木地圖產出</name>
+                <duration>251</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>9007</in>
+                <out>9258</out>
+                <start>1991</start>
+                <end>2242</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v11">
+                <name>Clip_11_實地探勘與倚天劍現身</name>
+                <duration>502</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>10659</in>
+                <out>11161</out>
+                <start>2242</start>
+                <end>2744</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v12">
+                <name>Clip_12_原民稱呼與巨木森林碳吸存</name>
+                <duration>512</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>13536</in>
+                <out>14048</out>
+                <start>2744</start>
+                <end>3256</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v13">
+                <name>Clip_13_氣候變遷威脅與巨木生長條件</name>
+                <duration>227</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>17256</in>
+                <out>17483</out>
+                <start>3256</start>
+                <end>3483</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+              <clipitem id="clipitem-v14">
+                <name>Clip_14_颱風加劇與呼籲保育</name>
+                <duration>453</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>18247</in>
+                <out>18700</out>
+                <start>3483</start>
+                <end>3936</end>
+                <file id="file-1">
+                  <name>take 2_1080p.mp4</name>
+                  <pathurl>file:///Users/sylph/Downloads/泛科學/AI初剪測試/take 2_1080p.mp4</pathurl>
+                  <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                  <duration>19152</duration>
+                  <media>
+                    <video>
+                      <samplecharacteristics>
+                        <width>1920</width>
+                        <height>1080</height>
+                      </samplecharacteristics>
+                    </video>
+                    <audio>
+                      <samplecharacteristics>
+                        <depth>16</depth>
+                        <samplerate>48000</samplerate>
+                      </samplecharacteristics>
+                      <channelcount>2</channelcount>
+                    </audio>
+                  </media>
+                </file>
+              </clipitem>
+            </track>
+          </video>
+          <audio>
+            <track>
+              <clipitem id="clipitem-a1">
+                <name>Clip_1_開場：台灣深山巨木現身</name>
+                <duration>62</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>978</in>
+                <out>1040</out>
+                <start>0</start>
+                <end>62</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a2">
+                <name>Clip_2_找巨木的難題與傳統盲點</name>
+                <duration>272</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>1446</in>
+                <out>1718</out>
+                <start>62</start>
+                <end>334</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a3">
+                <name>Clip_3_空載光達（LiDAR）技術調查</name>
+                <duration>334</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>3134</in>
+                <out>3468</out>
+                <start>334</start>
+                <end>668</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a4">
+                <name>Clip_4_演算法初篩結果</name>
+                <duration>144</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>4008</in>
+                <out>4152</out>
+                <start>668</start>
+                <end>812</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a5">
+                <name>Clip_5_轉折：數據異常與地形誤差</name>
+                <duration>32</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>4614</in>
+                <out>4646</out>
+                <start>812</start>
+                <end>844</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a6">
+                <name>Clip_6_演算法誤差原因：陡坡與樹基誤判</name>
+                <duration>368</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>5541</in>
+                <out>5909</out>
+                <start>844</start>
+                <end>1212</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a7">
+                <name>Clip_7_白忙一場的荒謬感</name>
+                <duration>211</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>6841</in>
+                <out>7052</out>
+                <start>1212</start>
+                <end>1423</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a8">
+                <name>Clip_8_過渡轉折：人眼的優勢</name>
+                <duration>50</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>7589</in>
+                <out>7639</out>
+                <start>1423</start>
+                <end>1473</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a9">
+                <name>Clip_9_公民科學家群眾外包計畫</name>
+                <duration>518</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>8016</in>
+                <out>8534</out>
+                <start>1473</start>
+                <end>1991</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a10">
+                <name>Clip_10_點雲分析與巨木地圖產出</name>
+                <duration>251</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>9007</in>
+                <out>9258</out>
+                <start>1991</start>
+                <end>2242</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a11">
+                <name>Clip_11_實地探勘與倚天劍現身</name>
+                <duration>502</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>10659</in>
+                <out>11161</out>
+                <start>2242</start>
+                <end>2744</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a12">
+                <name>Clip_12_原民稱呼與巨木森林碳吸存</name>
+                <duration>512</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>13536</in>
+                <out>14048</out>
+                <start>2744</start>
+                <end>3256</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a13">
+                <name>Clip_13_氣候變遷威脅與巨木生長條件</name>
+                <duration>227</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>17256</in>
+                <out>17483</out>
+                <start>3256</start>
+                <end>3483</end>
+                <file id="file-1"/>
+              </clipitem>
+              <clipitem id="clipitem-a14">
+                <name>Clip_14_颱風加劇與呼籲保育</name>
+                <duration>453</duration>
+                <rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate>
+                <in>18247</in>
+                <out>18700</out>
+                <start>3483</start>
+                <end>3936</end>
+                <file id="file-1"/>
+              </clipitem>
+            </track>
+          </audio>
+        </media>
+      </sequence>
+    </children>
+  </project>
+</xmeml>

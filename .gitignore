@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Environment variables & API keys
+.env
+*.env
+*.key
+
+# Media files (Large videos/audios)
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.wav
+*.mp3
+
+# Temporary files
+temp_*
