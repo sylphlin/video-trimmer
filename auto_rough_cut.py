@@ -2,7 +2,9 @@
 """
 PanSci AI Auto Rough Cut (泛科學 AI 自動初剪主程式)
 --------------------------------------------------
-基於 Gemini 3.8 Flash 多模態視訊理解 + 緊湊式減法剪輯（Compact Subtraction Cut）
+基於 Whisper 微觀字級聲學時間戳對齊 (Word-level Ground Truth)
++ Gemini 3.8 Flash 多模態視訊理解與選鏡決策 (Multimodal Take Selection)
++ 文字剪輯時間鎖定 (Text-Based Locked Time Cutting)
 支援語意重複取最後一次（Last Take Wins）、眼神就緒防眨眼、消除死寂停頓，
 一鍵輸出 Final Cut Pro / DaVinci Resolve / Premiere Pro 剪輯工程檔與 MP4 成片。
 """
@@ -14,6 +16,7 @@ import time
 import argparse
 import subprocess
 import re
+import difflib
 from pathlib import Path
 
 try:
@@ -26,13 +29,18 @@ except ImportError as e:
     print("請先執行: pip install -r requirements.txt")
     sys.exit(1)
 
+try:
+    from faster_whisper import WhisperModel
+    HAS_WHISPER = True
+except ImportError:
+    HAS_WHISPER = False
+
 
 def load_gemini_api_key():
     """載入 Gemini API Key，優先檢查環境變數，次之檢查本機 .env，再次之檢查 ~/.gemini/.env"""
     if os.environ.get("GEMINI_API_KEY"):
         return os.environ["GEMINI_API_KEY"]
     
-    # 檢查當前目錄與專案目錄的 .env
     for candidate in [Path.cwd() / ".env", Path(__file__).parent / ".env"]:
         try:
             if candidate.exists():
@@ -45,7 +53,6 @@ def load_gemini_api_key():
         except Exception:
             pass
 
-    # 檢查 ~/.gemini/.env
     try:
         env_file = Path.home() / ".gemini" / ".env"
         if env_file.exists():
@@ -74,7 +81,6 @@ def probe_video(video_path):
     if res.returncode != 0:
         print(f"ffprobe 錯誤: {res.stderr}")
         sys.exit(1)
-    
     info = json.loads(res.stdout)
     duration = float(info["format"]["duration"])
     v_stream = next(s for s in info["streams"] if s["codec_type"] == "video")
@@ -141,10 +147,9 @@ def detect_pre_speech_claps(audio_full, s_in, search_before=2.5, search_after=2.
 
 
 def calculate_clip_cps(transcript, duration):
-    """
-    計算該段落的每秒語速 (CPS: Characters/Syllables Per Second)。
-    中文按漢字數計算，英文/數字按詞與音節權重計算。
-    """
+    """計算片段口播語速 CPS (Characters/Syllables Per Second)"""
+    if not transcript or duration <= 0:
+        return 3.0, 0
     zh = len(re.findall(r'[\u4e00-\u9fff]', transcript))
     en_chars = len(re.findall(r'[a-zA-Z0-9]', transcript))
     syllables = zh + int(en_chars * 0.6)
@@ -154,149 +159,183 @@ def calculate_clip_cps(transcript, duration):
     return round(syllables / dur, 2), syllables
 
 
-def compute_dynamic_margins(cps, pacing_mode="auto"):
+def transcribe_video_whisper(video_path, out_json_path, model_name="small"):
     """
-    根據語速 CPS 計算最適留白空間：
-    - compact (固定緊湊): In=0.06s, Out=0.08s
-    - breathing (固定呼吸): In=0.35s, Out=0.45s
-    - auto / dynamic (連續動態浮動):
-      CPS >= 5.5 (快節奏新聞/短影音) -> In=0.06s, Out=0.08s
-      CPS <= 4.2 (沉穩慢說書/歷史漫談) -> In=0.35s, Out=0.45s
-      中間進行連續平滑線性插值 (Linear Continuous Interpolation)
+    第一階段：微觀聲學時間戳對齊 (Word-level Ground Truth)
+    在調用大模型之前，先在本地以 Whisper 生成帶有毫秒級字級時間戳的結構化劇本。
     """
-    if pacing_mode == "compact":
-        return 0.06, 0.08
-    elif pacing_mode == "breathing":
-        return 0.35, 0.45
+    out_json = Path(out_json_path)
+    if out_json.exists():
+        print(f"    載入既有之 Whisper 聲學時間戳: {out_json.name}")
+        with open(out_json, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-    # 連續型動態浮動呼吸 (Continuous Dynamic Floating)
-    t = (cps - 4.2) / (5.5 - 4.2)
-    t = max(0.0, min(1.0, t))
-    in_margin = 0.35 - t * (0.35 - 0.06)
-    out_margin = 0.45 - t * (0.45 - 0.08)
-    return round(in_margin, 2), round(out_margin, 2)
+    if not HAS_WHISPER:
+        print("    [提示] 未安裝 faster-whisper，跳過本地字級轉錄。")
+        return []
+
+    print(f"    本地調用 faster-whisper ({model_name}) 進行微觀字級時間戳轉錄...")
+    temp_wav = out_json.parent / f"temp_{video_path.stem}_whisper.wav"
+    subprocess.run([
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    segments, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh")
+
+    results = []
+    for i, s in enumerate(segments):
+        words_data = []
+        if s.words:
+            for w in s.words:
+                words_data.append({
+                    "word": w.word.strip(),
+                    "start": round(w.start, 2),
+                    "end": round(w.end, 2)
+                })
+        results.append({
+            "id": i + 1,
+            "start": round(s.start, 2),
+            "end": round(s.end, 2),
+            "text": s.text.strip(),
+            "words": words_data
+        })
+
+    temp_wav.unlink(missing_ok=True)
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+
+    print(f"    Whisper 轉錄完畢，共解析出 {len(results)} 個高精度時間戳片段。")
+    return results
 
 
-def find_clean_silence_boundary_in(audio, sr, true_onset, target_in_margin, last_clap=None, ambient_rms_thresh=0.015):
+def format_whisper_transcript_for_prompt(whisper_segs):
+    """將 Whisper 片段格式化為 Gemini 提示詞專用的文字剪輯清單"""
+    lines = [
+        "\n---",
+        "## Whisper 微觀字級時間戳劇本 (Ground-Truth Segments)",
+        "以下是由本地微觀語音模型對本片進行的逐句時間戳轉錄清單。",
+        "每個 Segment 均包含精確起訖秒數（start -> end）。",
+        "請在輸出 final_edl 時，直接引用選定片段對應的 `start_segment_id` 與 `end_segment_id`，",
+        "並將 `source_in` 與 `source_out` 對齊該 segment 之起訖時間（嚴禁自行粗估時間碼）：\n"
+    ]
+    for s in whisper_segs:
+        lines.append(f"[ID: {s['id']:3d}] {s['start']:6.2f}s -> {s['end']:6.2f}s | {s['text']}")
+    return "\n".join(lines)
+
+
+def normalize_text(text):
+    return re.sub(r'[^\w\u4e00-\u9fff]', '', text).lower()
+
+
+def align_clip_with_whisper(whisper_segs, clip_data, total_dur):
     """
-    從開口發音點 (true_onset) 往回取留白，但只能在純靜默底噪區延伸。
-    一旦遇到任何突發能量 (拍手、嗶聲、外人口令)，立刻停止回溯。
+    比照字幕方式：嚴格以 Whisper 物理時間為準，不猜測、不更動字尾！
+    優先採用 start_segment_id / end_segment_id，次之採用文本子字串比對，再次之採用時間窗。
     """
-    win = int(0.02 * sr)
-    current_t = true_onset
-    min_allowed_t = true_onset - target_in_margin
-    if last_clap is not None:
-        min_allowed_t = max(min_allowed_t, last_clap + 0.25)
+    if not whisper_segs:
+        return clip_data.get("source_in", 0), clip_data.get("source_out", total_dur)
 
-    while current_t > min_allowed_t + 0.005:
-        prev_idx = int((current_t - 0.02) * sr)
-        if prev_idx < 0:
-            break
-        frame = audio[prev_idx : prev_idx + win]
-        rms = np.sqrt(np.mean(frame**2))
-        peak = np.max(np.abs(frame))
-        if rms > ambient_rms_thresh or peak > 0.10:
-            break
-        current_t -= 0.005
-    return max(0.0, current_t)
+    start_id = clip_data.get("start_segment_id")
+    end_id = clip_data.get("end_segment_id")
+
+    # 1. 優先使用 ID
+    if start_id is not None and end_id is not None:
+        matched = [s for s in whisper_segs if start_id <= s["id"] <= end_id]
+        if matched:
+            return matched[0]["start"], matched[-1]["end"]
+
+    raw_in = clip_data.get("source_in", 0)
+    raw_out = clip_data.get("source_out", total_dur)
+    transcript = clip_data.get("transcript", "")
+
+    # 2. 透過時間窗附近篩選
+    cand_segs = [s for s in whisper_segs if not (s["end"] < raw_in - 2.5 or s["start"] > raw_out + 2.5)]
+    if not cand_segs:
+        return raw_in, raw_out
+
+    # 3. 逐字元建立時間線並做 SequenceMatcher
+    char_timeline = []
+    for s in cand_segs:
+        words = s.get("words", [])
+        if words:
+            for w in words:
+                w_norm = normalize_text(w["word"])
+                if not w_norm:
+                    continue
+                w_dur = (w["end"] - w["start"]) / len(w_norm)
+                for idx, ch in enumerate(w_norm):
+                    ch_start = w["start"] + idx * w_dur
+                    char_timeline.append((ch, round(ch_start, 3), round(ch_start + w_dur, 3)))
+        else:
+            s_norm = normalize_text(s["text"])
+            if s_norm:
+                s_dur = (s["end"] - s["start"]) / len(s_norm)
+                for idx, ch in enumerate(s_norm):
+                    ch_start = s["start"] + idx * s_dur
+                    char_timeline.append((ch, round(ch_start, 3), round(ch_start + s_dur, 3)))
+
+    tgt_norm = normalize_text(transcript)
+    whisper_str = ''.join([item[0] for item in char_timeline])
+
+    if tgt_norm and whisper_str and char_timeline:
+        matcher = difflib.SequenceMatcher(None, tgt_norm, whisper_str)
+        blocks = [b for b in matcher.get_matching_blocks() if b.size > 0]
+        if blocks:
+            first_b = blocks[0]
+            last_b = blocks[-1]
+            t_first = char_timeline[first_b.b][1]
+            t_last = char_timeline[min(len(char_timeline) - 1, last_b.b + last_b.size - 1)][2]
+            return t_first, t_last
+
+    # 若匹配落空，返回重疊 segment 範圍
+    return cand_segs[0]["start"], cand_segs[-1]["end"]
 
 
-def find_speech_decay_end(audio, sr, last_strong_t, max_decay_search=0.35, decay_rms_thresh=0.006):
+def refine_speech_bounds_locked(audio, sr, t_first, t_last, total_dur, transcript="", pacing="auto"):
     """
-    從最後一個強發音點 (RMS > 0.02) 向後追蹤字音的物理自然衰減 (Decay)，
-    直到能量真正回落至環境底噪基準，確保字尾收音完整不被切斷。
+    文字剪輯時間鎖定標準 (Text-Based Locked Time Standard):
+    - 嚴格尊重 Whisper 物理發音時間戳，絕不提前切斷字尾！
+    - 開頭：保留 0.12s 前置呼吸氣息，但以開拍前拍手打板點為絕對硬防護阻斷 (Physical Clap Guard)。
+    - 結尾：在最後一個字發音結束後，保留 0.25s 俐落自然閉口定格，流暢緊湊不拖沓。
     """
-    win = int(0.02 * sr)
-    t = last_strong_t
-    max_t = min(len(audio) / sr, last_strong_t + max_decay_search)
-
-    while t < max_t:
-        idx = int(t * sr)
-        if idx + win >= len(audio):
-            break
-        frame = audio[idx : idx + win]
-        rms = np.sqrt(np.mean(frame**2))
-        if rms < decay_rms_thresh:
-            # 雙重驗證：確認後續 30ms 也是安靜的，避免短暫輔音或唇齒間隙誤判
-            idx_next = idx + int(0.03 * sr)
-            if idx_next + win < len(audio):
-                frame_next = audio[idx_next : idx_next + win]
-                if np.sqrt(np.mean(frame_next**2)) < decay_rms_thresh:
-                    return t
-        t += 0.005
-    return min(max_t, t)
-
-
-def find_clean_silence_boundary_out(audio, sr, speech_decay_end, target_out_margin, total_dur, voice_burst_thresh=0.035):
-    """
-    從尾音自然衰減結束點 (speech_decay_end) 往後保留表情沉澱與放鬆留白。
-    僅防禦外人突發插話 (例如導演大喊『卡！』、『好！』或工作人員插嘴)：
-    若在留白區間內偵測到新發音能量爆發，則在該雜音前 50ms 提前下刀切出；
-    若環境為正常底噪，則 100% 賦予完整的動態留白。
-    """
-    win = int(0.02 * sr)
-    max_allowed_t = min(total_dur, speech_decay_end + target_out_margin)
-    # 衰減點後 50ms 避開殘存微氣流
-    t = speech_decay_end + 0.05
-
-    while t < max_allowed_t:
-        idx = int(t * sr)
-        if idx + win >= len(audio):
-            break
-        frame = audio[idx : idx + win]
-        rms = np.sqrt(np.mean(frame**2))
-        peak = np.max(np.abs(frame))
-        # 僅在偵測到明顯外人講話 / 拍手脈衝時提前切出
-        if rms > voice_burst_thresh or peak > 0.20:
-            return max(speech_decay_end + 0.05, t - 0.05)
-        t += 0.005
-    return max_allowed_t
-
-
-def refine_speech_bounds(audio, sr, s_in, s_out, total_dur, transcript="", pacing="auto"):
-    """
-    透過音訊 RMS 能量回溯掃描，精確定位字音起訖點，
-    結合連續型動態浮動呼吸 (CPS) 與純靜默邊界防護，
-    保證 100% 杜絕任何非主講人聲音 (拍手、嗶聲、導演口令)，
-    並完整保護字尾自然消退期與微表情餘韻。
-    """
-    # 1. 偵測開拍前之拍手打板脈衝 (作為物理硬防護)
-    claps = detect_pre_speech_claps(audio, s_in, search_before=2.5, search_after=2.0, sr=sr)
+    # 1. 偵測開拍前之拍手打板脈衝
+    claps = detect_pre_speech_claps(audio, t_first, search_before=2.5, search_after=1.5, sr=sr)
     last_clap = max(claps) if claps else None
 
-    # 2. 計算動態語速留白
-    raw_dur = max(0.5, s_out - s_in)
-    cps, _ = calculate_clip_cps(transcript, raw_dur)
-    in_margin, out_margin = compute_dynamic_margins(cps, pacing)
-
-    # 3. 語音能量回溯掃描
-    start_t = max(0.0, s_in - 2.5)
-    end_t = min(total_dur, s_out + 1.0)
-    seg = audio[int(start_t * sr):int(end_t * sr)]
-    win_len = int(0.02 * sr)  # 20ms
-    hop_len = int(0.005 * sr) # 5ms
-
-    rms_vals = [np.sqrt(np.mean(seg[i:i + win_len] ** 2)) for i in range(0, len(seg) - win_len, hop_len)]
-    t_vals = [start_t + i * 0.005 for i in range(len(rms_vals))]
-
-    # 尋找真正人聲起訖點（必須嚴格位於最後一記拍手之後）
-    speech_times = [t for t, r in zip(t_vals, rms_vals) if (last_clap is None or t >= last_clap + 0.20) and r > 0.020]
-
-    if speech_times:
-        true_onset = speech_times[0]
-        last_strong_speech = speech_times[-1]
+    # 2. 句首下刀點 (氣息留白，拍手防護)
+    if last_clap is not None and last_clap < t_first:
+        final_in = max(last_clap + 0.10, t_first - 0.12)
     else:
-        true_onset = s_in
-        last_strong_speech = s_out
+        final_in = max(0.0, t_first - 0.12)
 
-    # 追蹤最後字音的自然衰減，直到沉入環境底噪
-    speech_decay_end = find_speech_decay_end(audio, sr, last_strong_speech)
+    # 3. 句尾下刀點 (俐落收口定格)
+    # 檢查 t_last 後方是否突然有工作人員喊卡或拍手
+    max_out = min(total_dur, t_last + 0.25)
+    win_len = int(0.02 * sr)
+    t = t_last + 0.05
+    final_out = max_out
 
-    # 4. 純靜默向外取留白
-    final_in = find_clean_silence_boundary_in(audio, sr, true_onset, in_margin, last_clap)
-    final_out = find_clean_silence_boundary_out(audio, sr, speech_decay_end, out_margin, total_dur)
+    while t < max_out:
+        idx = int(t * sr)
+        if idx + win_len >= len(audio):
+            break
+        frame = audio[idx : idx + win_len]
+        peak = np.max(np.abs(frame))
+        rms = np.sqrt(np.mean(frame**2))
+        # 僅在偵測到極大能量突發（外人搶話/拍手）時提前停止
+        if peak > 0.25 or rms > 0.040:
+            final_out = max(t_last + 0.05, t - 0.03)
+            break
+        t += 0.005
 
-    return round(final_in, 2), round(final_out, 2), cps, in_margin, out_margin
+    raw_dur = max(0.5, final_out - final_in)
+    cps, _ = calculate_clip_cps(transcript, raw_dur)
+    in_m = round(t_first - final_in, 2)
+    out_m = round(final_out - t_last, 2)
+
+    return round(final_in, 2), round(final_out, 2), cps, in_m, out_m
 
 
 def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976):
@@ -319,52 +358,37 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         '          <video>',
         '            <format>',
         '              <samplecharacteristics>',
+        f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
         f'                <width>{width}</width>',
         f'                <height>{height}</height>',
-        f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
+        '                <pixelaspectratio>square</pixelaspectratio>',
         '              </samplecharacteristics>',
         '            </format>',
         '            <track>'
     ]
 
-    cursor = 0
-    for i, c in enumerate(edl):
-        in_f = s2f(c["source_in"])
-        out_f = s2f(c["source_out"])
-        dur_f = out_f - in_f
-        c_start = cursor
-        c_end = cursor + dur_f
-        cursor = c_end
+    timeline_cursor = 0
+    for idx, clip in enumerate(edl):
+        in_frame = s2f(clip["source_in"])
+        out_frame = s2f(clip["source_out"])
+        dur_frame = max(1, out_frame - in_frame)
+        start_frame = timeline_cursor
+        end_frame = timeline_cursor + dur_frame
+        timeline_cursor = end_frame
 
         xml_lines.extend([
-            f'              <clipitem id="clipitem-v{i+1}">',
-            f'                <name>Clip_{c["clip_id"]}_{c["topic"]}</name>',
-            f'                <duration>{dur_f}</duration>',
+            f'              <clipitem id="clipitem-v{idx+1}">',
+            f'                <name>Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}</name>',
             f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
-            f'                <in>{in_f}</in>',
-            f'                <out>{out_f}</out>',
-            f'                <start>{c_start}</start>',
-            f'                <end>{c_end}</end>',
-            '                <file id="file-1">',
+            f'                <in>{in_frame}</in>',
+            f'                <out>{out_frame}</out>',
+            f'                <start>{start_frame}</start>',
+            f'                <end>{end_frame}</end>',
+            f'                <file id="file-1">',
             f'                  <name>{video_path.name}</name>',
-            f'                  <pathurl>file://{video_path.resolve()}</pathurl>',
+            f'                  <pathurl>file://localhost{video_path.resolve()}</pathurl>',
             f'                  <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
             f'                  <duration>{s2f(total_source_dur)}</duration>',
-            '                  <media>',
-            '                    <video>',
-            '                      <samplecharacteristics>',
-            f'                        <width>{width}</width>',
-            f'                        <height>{height}</height>',
-            '                      </samplecharacteristics>',
-            '                    </video>',
-            '                    <audio>',
-            '                      <samplecharacteristics>',
-            '                        <depth>16</depth>',
-            '                        <samplerate>48000</samplerate>',
-            '                      </samplecharacteristics>',
-            '                      <channelcount>2</channelcount>',
-            '                    </audio>',
-            '                  </media>',
             '                </file>',
             '              </clipitem>'
         ])
@@ -376,25 +400,24 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         '            <track>'
     ])
 
-    cursor = 0
-    for i, c in enumerate(edl):
-        in_f = s2f(c["source_in"])
-        out_f = s2f(c["source_out"])
-        dur_f = out_f - in_f
-        c_start = cursor
-        c_end = cursor + dur_f
-        cursor = c_end
+    timeline_cursor = 0
+    for idx, clip in enumerate(edl):
+        in_frame = s2f(clip["source_in"])
+        out_frame = s2f(clip["source_out"])
+        dur_frame = max(1, out_frame - in_frame)
+        start_frame = timeline_cursor
+        end_frame = timeline_cursor + dur_frame
+        timeline_cursor = end_frame
 
         xml_lines.extend([
-            f'              <clipitem id="clipitem-a{i+1}">',
-            f'                <name>Clip_{c["clip_id"]}_{c["topic"]}</name>',
-            f'                <duration>{dur_f}</duration>',
+            f'              <clipitem id="clipitem-a{idx+1}">',
+            f'                <name>Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}</name>',
             f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
-            f'                <in>{in_f}</in>',
-            f'                <out>{out_f}</out>',
-            f'                <start>{c_start}</start>',
-            f'                <end>{c_end}</end>',
-            '                <file id="file-1"/>',
+            f'                <in>{in_frame}</in>',
+            f'                <out>{out_frame}</out>',
+            f'                <start>{start_frame}</start>',
+            f'                <end>{end_frame}</end>',
+            f'                <file id="file-1"/>',
             '              </clipitem>'
         ])
 
@@ -407,81 +430,78 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         '  </project>',
         '</xmeml>'
     ])
-    output_xml_path.write_text("\n".join(xml_lines), encoding="utf-8")
+
+    Path(output_xml_path).write_text('\n'.join(xml_lines), encoding='utf-8')
 
 
 def generate_fcpxml(edl, video_path, total_source_dur, total_out_dur, output_fcpxml_path, fps=23.976):
-    """產生 Final Cut Pro X 專用 XML (FCPXML v1.9)"""
-    def s2f(sec):
-        return int(round(sec * fps))
+    """產生 Final Cut Pro X 相容的 FCPXML (v1.9)"""
+    def sec_to_fraction(sec):
+        frames = int(round(sec * 24000 / 1001))
+        return f"{frames * 1001}/24000s"
 
-    fcpxml_lines = [
+    total_out_frac = sec_to_fraction(total_out_dur)
+    total_src_frac = sec_to_fraction(total_source_dur)
+
+    xml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<!DOCTYPE fcpxml>',
         '<fcpxml version="1.9">',
-        '    <resources>',
-        '        <format id="r1" name="FFVideoFormat1080p2398" frameDuration="1001/24000s" width="1920" height="1080" />',
-        f'        <asset id="r2" name="{video_path.stem}" src="file://{video_path.resolve()}" start="0s" duration="{s2f(total_source_dur) * 1001}/24000s" format="r1" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000" />',
-        '    </resources>',
-        '    <library>',
-        '        <event name="AI_RoughCut">',
-        f'            <project name="{video_path.stem}_Final_Cut">',
-        f'                <sequence format="r1" duration="{s2f(total_out_dur) * 1001}/24000s">',
-        '                    <spine>'
+        '  <resources>',
+        '    <format id="r1" name="FFVideoFormat1080p2398" frameDuration="1001/24000s" width="1920" height="1080"/>',
+        f'    <asset id="r2" name="{video_path.name}" src="file://localhost{video_path.resolve()}" start="0s" duration="{total_src_frac}" hasVideo="1" hasAudio="1" format="r1"/>',
+        '  </resources>',
+        '  <library>',
+        f'    <event name="AI_RoughCut_{video_path.stem}">',
+        f'      <project name="{video_path.stem}_RoughCut">',
+        f'        <sequence format="r1" duration="{total_out_frac}">',
+        '          <spine>'
     ]
 
-    for c in edl:
-        s_in = c["source_in"]
-        dur = c["duration"]
-        in_f = s2f(s_in)
-        dur_f = s2f(dur)
-        cid = c["clip_id"]
-        topic = c["topic"]
-        fcpxml_lines.append(f'                        <asset-clip name="Clip_{cid}_{topic}" ref="r2" offset="0s" start="{in_f * 1001}/24000s" duration="{dur_f * 1001}/24000s" format="r1" />')
+    for clip in edl:
+        clip_dur = clip["duration"]
+        start_frac = sec_to_fraction(clip["source_in"])
+        dur_frac = sec_to_fraction(clip_dur)
+        name = f"Clip_{clip['clip_id']:02d}_{clip['topic'][:15]}"
+        xml.append(f'            <asset-clip name="{name}" ref="r2" offset="0s" start="{start_frac}" duration="{dur_frac}"/>')
 
-    fcpxml_lines.extend([
-        '                    </spine>',
-        '                </sequence>',
-        '            </project>',
-        '        </event>',
-        '    </library>',
+    xml.extend([
+        '          </spine>',
+        '        </sequence>',
+        '      </project>',
+        '    </event>',
+        '  </library>',
         '</fcpxml>'
     ])
-    output_fcpxml_path.write_text("\n".join(fcpxml_lines), encoding="utf-8")
+
+    Path(output_fcpxml_path).write_text('\n'.join(xml), encoding='utf-8')
 
 
 def render_cut_video(edl, video_path, out_mp4_path, crf=18):
-    """透過 FFmpeg 進行精準幀剪切與邊緣 15ms 微淡化無縫拼接"""
-    filter_parts = []
-    v_labels = []
-    a_labels = []
-
-    for i, c in enumerate(edl):
-        s_in = c["source_in"]
-        s_out = c["source_out"]
-        dur = s_out - s_in
-        fade_d = 0.015  # 15ms 防爆音微淡化
-        fade_out_st = max(0.0, dur - fade_d)
-
-        filter_parts.append(f"[0:v]trim=start={s_in:.3f}:end={s_out:.3f},setpts=PTS-STARTPTS[v{i}]")
-        filter_parts.append(f"[0:a]atrim=start={s_in:.3f}:end={s_out:.3f},asetpts=PTS-STARTPTS,afade=t=in:ss=0:d={fade_d:.3f},afade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}[a{i}]")
-        v_labels.append(f"[v{i}]")
-        a_labels.append(f"[a{i}]")
-
-    concat_v = "".join(v_labels)
-    concat_a = "".join(a_labels)
+    """使用 FFmpeg 依據精確時間碼進行高畫質轉碼拼接 (無縫零跳幀)"""
     n = len(edl)
-    concat_filter = f"{concat_v}concat=n={n}:v=1:a=0[outv];{concat_a}concat=n={n}:v=0:a=1[outa]"
-    filter_complex = ";".join(filter_parts) + ";" + concat_filter
+    if n == 0:
+        print("警告: 無入選片段可供渲染。")
+        return
+
+    filter_complex = []
+    for i, c in enumerate(edl):
+        filter_complex.append(
+            f"[0:v]trim=start={c['source_in']:.3f}:end={c['source_out']:.3f},setpts=PTS-STARTPTS[v{i}]; "
+            f"[0:a]atrim=start={c['source_in']:.3f}:end={c['source_out']:.3f},asetpts=PTS-STARTPTS[a{i}];"
+        )
+    concat_inputs = "".join([f"[v{i}][a{i}]" for i in range(n)])
+    filter_complex.append(f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]")
 
     cmd = [
-        "ffmpeg", "-i", str(video_path),
-        "-filter_complex", filter_complex,
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-filter_complex", "".join(filter_complex),
         "-map", "[outv]", "-map", "[outa]",
         "-c:v", "libx264", "-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "320k",
         "-movflags", "+faststart",
-        "-y", str(out_mp4_path)
+        str(out_mp4_path)
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -490,15 +510,17 @@ def render_cut_video(edl, video_path, out_mp4_path, crf=18):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="泛科學 AI 自動初剪工具 (Gemini 3.8 Flash)")
+    parser = argparse.ArgumentParser(description="泛科學 AI 自動初剪工具 (Whisper Ground-Truth + Gemini 3.8 Flash)")
     parser.add_argument("--input", "-i", required=True, help="輸入影片檔案路徑 (MP4/MOV)")
     parser.add_argument("--output-dir", "-o", default=None, help="輸出資料夾 (預設為影片所在目錄)")
     parser.add_argument("--model", "-m", default="gemini-3.8-flash", help="使用的 Gemini 模型名稱")
     parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 畫質參數 (預設 18)")
     parser.add_argument("--pacing", "-p", choices=["auto", "dynamic", "compact", "breathing"], default="auto",
-                        help="剪輯節奏風格: 'auto'/'dynamic' (自適應連續動態浮動, 預設推薦), 'compact' (極致緊湊減法), 'breathing' (呼吸空間留白)")
+                        help="剪輯節奏風格: 'auto'/'dynamic' (文字剪輯微氣息鎖定, 推薦預設)")
+    parser.add_argument("--script", "-s", default=None, help="可選的分鏡講稿或文本檔案路徑 (TXT/MD)")
     parser.add_argument("--cached-json", default=None,
-                        help="指定既有之初剪決策 JSON 檔案路徑，跳過 Gemini 上傳與雲端分析 (便於快速微調留白與重渲染)")
+                        help="指定既有之初剪決策 JSON 檔案路徑，跳過 Gemini 上傳與雲端分析")
+    parser.add_argument("--skip-whisper", action="store_true", help="跳過本地 Whisper 轉錄，僅使用純能量檢測")
     args = parser.parse_args()
 
     video_path = Path(args.input).resolve()
@@ -514,19 +536,26 @@ def main():
     total_dur, width, height, fps = probe_video(video_path)
     print(f"    時長: {total_dur:.1f} 秒 (~{total_dur/60:.1f} 分鐘) | 解析度: {width}x{height} | 幀率: {fps:.3f} fps")
 
+    # 第一階段：Whisper 微觀聲學時間戳對齊 (Word-level Ground Truth)
+    whisper_segs = []
+    if not args.skip_whisper:
+        whisper_json = out_dir / f"{base_name}_whisper_raw.json"
+        print(f"==> 2. 執行 Whisper 微觀字級聲學時間戳轉錄...")
+        whisper_segs = transcribe_video_whisper(video_path, whisper_json, model_name="small")
+
+    # 第二階段：Gemini 宏觀多模態視訊理解與選鏡決策
     if args.cached_json:
         cached_file = Path(args.cached_json).resolve()
         if not cached_file.exists():
             print(f"錯誤: 找不到快取 JSON 檔案: {cached_file}")
             sys.exit(1)
-        print(f"==> 2. 跳過 Gemini 模型分析，直接載入快取初剪決策: {cached_file.name}")
+        print(f"==> 3. 跳過 Gemini 模型分析，直接載入快取初剪決策: {cached_file.name}")
         with open(cached_file, "r", encoding="utf-8") as f:
             model_edl = json.load(f)
     else:
         load_gemini_api_key()
         client = genai.Client()
 
-        # 讀取 Markdown 格式提示詞
         prompt_file = Path(__file__).parent / "prompts" / "video_cut_prompt.md"
         if prompt_file.exists():
             prompt = prompt_file.read_text(encoding="utf-8")
@@ -534,7 +563,17 @@ def main():
             print("未找到 prompts/video_cut_prompt.md，請確認專案結構完整。")
             sys.exit(1)
 
-        print(f"==> 2. 上傳影片至 Gemini Files API ({video_path.stat().st_size / (1024*1024):.1f} MB)...")
+        # 附上分鏡講稿 (若有)
+        if args.script:
+            script_path = Path(args.script).resolve()
+            if script_path.exists():
+                prompt += f"\n\n---\n## 參考講稿 (Production Script)\n{script_path.read_text(encoding='utf-8')}\n"
+
+        # 附上 Whisper 轉錄劇本
+        if whisper_segs:
+            prompt += format_whisper_transcript_for_prompt(whisper_segs)
+
+        print(f"==> 3. 上傳影片至 Gemini Files API ({video_path.stat().st_size / (1024*1024):.1f} MB)...")
         t0 = time.time()
         video_file = client.files.upload(file=str(video_path))
         print(f"    上傳完畢 (耗時 {time.time() - t0:.1f} 秒)。等待雲端轉碼 ACTIVE...")
@@ -547,7 +586,7 @@ def main():
             print(f"Gemini 處理失敗: {video_file.state.name}")
             sys.exit(1)
 
-        print(f"==> 3. 調用 {args.model} 進行多模態視訊理解與初剪決策...")
+        print(f"==> 4. 調用 {args.model} 結合 Whisper 劇本進行文字剪輯與選鏡決策...")
         t1 = time.time()
         response = client.models.generate_content(
             model=args.model,
@@ -560,7 +599,6 @@ def main():
         )
         print(f"    模型分析完成 (耗時 {time.time() - t1:.1f} 秒)！")
 
-        # 清理遠端檔案
         try:
             client.files.delete(name=video_file.name)
         except Exception:
@@ -577,35 +615,24 @@ def main():
 
         model_edl = json.loads(raw_json)
 
-    if args.pacing in ["auto", "dynamic"]:
-        pacing_label = "【自適應連續動態浮動呼吸模式（Dynamic Floating Pacing）】"
-    elif args.pacing == "breathing":
-        pacing_label = "【呼吸空間模式（Breathing Space）】"
-    else:
-        pacing_label = "【緊湊減法模式（Compact Subtraction）】"
-
-    print(f"==> 4. 抽取音軌進行能量全頻譜掃描，套用 {pacing_label}...")
+    # 第三階段：比照字幕邏輯——時間鎖定與拍手防護
+    print(f"==> 5. 執行文字剪輯時間鎖定 (Text-Based Locked Timestamps) 與拍手防護...")
     temp_wav = out_dir / f"temp_{base_name}.wav"
     subprocess.run(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     audio, sr = sf.read(str(temp_wav))
 
     refined_edl = []
     for c in model_edl.get("final_edl", []):
-        raw_in = c["source_in"]
-        raw_out = c["source_out"]
-        # 智能解析時間戳 (僅當數值超過總長時才轉 mm:ss)
-        s_in = resolve_timestamp(raw_in, total_dur)
-        s_out = resolve_timestamp(raw_out, total_dur)
-        if s_out <= s_in:
-            s_out = max(raw_out, s_in + 1.0)
-
+        t_first, t_last = align_clip_with_whisper(whisper_segs, c, total_dur)
         transcript = c.get("transcript", "") or c.get("content", "")
-        tight_in, tight_out, clip_cps, in_m, out_m = refine_speech_bounds(
-            audio, sr, s_in, s_out, total_dur, transcript=transcript, pacing=args.pacing
+
+        tight_in, tight_out, clip_cps, in_m, out_m = refine_speech_bounds_locked(
+            audio, sr, t_first, t_last, total_dur, transcript=transcript, pacing=args.pacing
         )
         if tight_out <= tight_in:
             tight_out = tight_in + 1.0
         dur = round(tight_out - tight_in, 2)
+
         refined_edl.append({
             "clip_id": c["clip_id"],
             "topic": c["topic"],
@@ -617,30 +644,27 @@ def main():
             "out_margin": out_m,
             "transcript": transcript,
             "visual_check": c.get("visual_check", "眼神直視鏡頭就緒，無眨眼閉眼"),
-            "audio_check": c.get("audio_check", f"CPS={clip_cps:.2f} 字/秒 (In留白={in_m:.2f}s, Out留白={out_m:.2f}s, 純靜默邊界)")
+            "audio_check": c.get("audio_check", f"Whisper精準錨定 (In前置氣息={in_m:.2f}s, Out俐落收口={out_m:.2f}s)")
         })
-        print(f"    Clip {c['clip_id']:2d}: In={tight_in:6.2f}s, Out={tight_out:6.2f}s ({dur:5.2f}s) | CPS={clip_cps:4.2f} (In={in_m:.2f}s, Out={out_m:.2f}s) | {c['topic']}")
+        print(f"    Clip {c['clip_id']:2d}: In={tight_in:6.2f}s, Out={tight_out:6.2f}s ({dur:5.2f}s) | 首字: {t_first:.2f}s, 尾字: {t_last:.2f}s | {c['topic']}")
 
     temp_wav.unlink(missing_ok=True)
     total_out_dur = round(sum(c["duration"] for c in refined_edl), 2)
     avg_cps = round(sum(c["cps"] for c in refined_edl) / max(1, len(refined_edl)), 2)
     print(f"    初剪片段數: {len(refined_edl)} | 成片預計長度: {total_out_dur:.1f} 秒 (~{total_out_dur/60:.2f} 分鐘) | 全片平均語速: {avg_cps:.2f} 字/秒")
 
-    file_tag = f"_{args.pacing}" if args.pacing != "compact" else ""
-
-    # 5. 儲存 JSON
-    json_path = out_dir / f"{base_name}{file_tag}_edl.json"
+    # 輸出資料
+    json_path = out_dir / f"{base_name}_text_based_edl.json"
     json_path.write_text(json.dumps({
-        "project_title": f"{base_name} AI 初剪 ({args.pacing})",
-        "pacing_style": args.pacing,
+        "project_title": f"{base_name} AI 文字剪輯初剪",
+        "pacing_style": "text_based_whisper_grounded",
         "average_cps": avg_cps,
         "total_duration": total_out_dur,
         "final_edl": refined_edl
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"==> 5. 輸出結構化資料: {json_path.name}")
+    print(f"==> 6. 輸出結構化資料: {json_path.name}")
 
-    # 6. 儲存 CSV
-    csv_path = out_dir / f"{base_name}{file_tag}_edl.csv"
+    csv_path = out_dir / f"{base_name}_text_based_edl.csv"
     with open(csv_path, "w", encoding="utf-8-sig") as f:
         f.write("Clip_ID,Topic,Source_In,Source_Out,Duration,CPS,In_Margin,Out_Margin,Transcript,Visual_Check,Audio_Check\n")
         for c in refined_edl:
@@ -648,21 +672,18 @@ def main():
             vc = c["visual_check"].replace('"', '""')
             ac = c["audio_check"].replace('"', '""')
             f.write(f'{c["clip_id"]},"{c["topic"]}",{c["source_in"]:.2f},{c["source_out"]:.2f},{c["duration"]:.2f},{c["cps"]:.2f},{c["in_margin"]:.2f},{c["out_margin"]:.2f},"{tr}","{vc}","{ac}"\n')
-    print(f"==> 6. 輸出表格清單: {csv_path.name}")
+    print(f"==> 7. 輸出表格清單: {csv_path.name}")
 
-    # 7. 儲存 FCP 7 XML (Premiere / DaVinci)
-    xml_path = out_dir / f"{base_name}{file_tag}_edl.xml"
+    xml_path = out_dir / f"{base_name}_text_based_edl.xml"
     generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps)
-    print(f"==> 7. 輸出通用剪輯工程檔: {xml_path.name}")
+    print(f"==> 8. 輸出通用剪輯工程檔: {xml_path.name}")
 
-    # 8. 儲存 FCPXML (Final Cut Pro X)
-    fcpxml_path = out_dir / f"{base_name}{file_tag}_edl.fcpxml"
+    fcpxml_path = out_dir / f"{base_name}_text_based_edl.fcpxml"
     generate_fcpxml(refined_edl, video_path, total_dur, total_out_dur, fcpxml_path, fps)
-    print(f"==> 8. 輸出 Final Cut Pro X 工程檔: {fcpxml_path.name}")
+    print(f"==> 9. 輸出 Final Cut Pro X 工程檔: {fcpxml_path.name}")
 
-    # 9. FFmpeg 渲染成片
-    out_mp4 = out_dir / f"{base_name}{file_tag}_final_cut.mp4"
-    print(f"==> 9. FFmpeg 渲染{pacing_label}成片: {out_mp4.name} ...")
+    out_mp4 = out_dir / f"{base_name}_text_based_rough_cut.mp4"
+    print(f"==> 10. FFmpeg 渲染成片: {out_mp4.name} ...")
     render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
     print(f"==> [完成] 最終成片已產出！檔案大小: {out_mp4.stat().st_size / (1024*1024):.1f} MB")
 
