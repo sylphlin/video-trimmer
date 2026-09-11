@@ -104,10 +104,17 @@ def resolve_timestamp(raw_val, total_dur):
     return raw_val
 
 
-def refine_speech_bounds(audio, sr, s_in, s_out, total_dur):
-    """透過音訊 RMS 能量回溯掃描，精確定位字音起訖點並套用緊湊減法，同時自動濾除拍手/打板雜音"""
-    start_t = max(0.0, s_in - 0.5)
-    end_t = min(total_dur, s_out + 0.5)
+def refine_speech_bounds(audio, sr, s_in, s_out, total_dur, pacing="compact"):
+    """
+    透過音訊 RMS 能量回溯掃描，精確定位字音起訖點，自動濾除拍手/打板雜音，
+    並依據 pacing 風格模式設定起迄留白裕度：
+    - 'compact': 緊湊減法模式（開口前 0.06s，落音後 0.06s，相鄰停頓 ~0.20s）
+    - 'breathing': 呼吸空間模式（開口前 0.28s，落音後 0.45s，相鄰停頓 ~0.70s）
+    """
+    head_search = 1.0 if pacing == "breathing" else 0.5
+    tail_search = 1.0 if pacing == "breathing" else 0.5
+    start_t = max(0.0, s_in - head_search)
+    end_t = min(total_dur, s_out + tail_search)
     
     seg = audio[int(start_t * sr):int(end_t * sr)]
     win_len = int(0.02 * sr)  # 20ms
@@ -116,10 +123,12 @@ def refine_speech_bounds(audio, sr, s_in, s_out, total_dur):
     rms_vals = [np.sqrt(np.mean(seg[i:i + win_len] ** 2)) for i in range(0, len(seg) - win_len, hop_len)]
     t_vals = [start_t + i * 0.005 for i in range(len(rms_vals))]
     
+    threshold = 0.020 if pacing == "breathing" else 0.030
+    
     # 尋找真正連續語音，跳過孤立拍手脈衝（拍手特徵：極短脈衝且後方跟隨 >250ms 寂靜）
     speech_times = []
     for idx, (t, r) in enumerate(zip(t_vals, rms_vals)):
-        if r > 0.03:
+        if r > threshold:
             # 檢查開頭是否有拍手/打板 (若後方 250ms 內能量皆低於 0.015，則為孤立拍手，予以忽略)
             future_rms = rms_vals[idx + 1:idx + 50]  # 50 * 5ms = 250ms
             if len(future_rms) >= 20 and max(future_rms) < 0.015:
@@ -133,9 +142,15 @@ def refine_speech_bounds(audio, sr, s_in, s_out, total_dur):
         true_onset = s_in
         true_offset = s_out
         
-    # 緊湊下刀：開口前 0.06s 微呼吸，句尾落音後 0.06s 俐落切斷
-    compact_in = max(0.0, true_onset - 0.06)
-    compact_out = min(total_dur, true_offset + 0.06)
+    if pacing == "breathing":
+        # 呼吸空間：開口前 0.28s 氣息與眼神就位，句尾落音後 0.45s 從容餘韻
+        compact_in = max(0.0, true_onset - 0.28)
+        compact_out = min(total_dur, true_offset + 0.45)
+    else:
+        # 緊湊下刀：開口前 0.06s 微呼吸，句尾落音後 0.06s 俐落切斷
+        compact_in = max(0.0, true_onset - 0.06)
+        compact_out = min(total_dur, true_offset + 0.06)
+        
     return round(compact_in, 2), round(compact_out, 2)
 
 
@@ -335,6 +350,8 @@ def main():
     parser.add_argument("--output-dir", "-o", default=None, help="輸出資料夾 (預設為影片所在目錄)")
     parser.add_argument("--model", "-m", default="gemini-3.8-flash", help="使用的 Gemini 模型名稱")
     parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 畫質參數 (預設 18)")
+    parser.add_argument("--pacing", "-p", choices=["compact", "breathing"], default="compact",
+                        help="剪輯節奏風格: 'compact' (極致緊湊減法, 適用新聞/科普) 或 'breathing' (呼吸空間留白, 適用慢說書/文化訪談)")
     args = parser.parse_args()
 
     video_path = Path(args.input).resolve()
@@ -404,7 +421,8 @@ def main():
 
     model_edl = json.loads(raw_json)
 
-    print("==> 4. 抽取音軌進行能量（RMS）全頻譜回溯掃描，套用極致緊湊減法...")
+    pacing_label = "【呼吸空間模式（Breathing Space）】" if args.pacing == "breathing" else "【緊湊減法模式（Compact Subtraction）】"
+    print(f"==> 4. 抽取音軌進行能量（RMS）全頻譜回溯掃描，套用 {pacing_label}...")
     temp_wav = out_dir / f"temp_{base_name}.wav"
     subprocess.run(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     audio, sr = sf.read(str(temp_wav))
@@ -419,7 +437,7 @@ def main():
         if s_out <= s_in:
             s_out = max(raw_out, s_in + 1.0)
 
-        tight_in, tight_out = refine_speech_bounds(audio, sr, s_in, s_out, total_dur)
+        tight_in, tight_out = refine_speech_bounds(audio, sr, s_in, s_out, total_dur, pacing=args.pacing)
         if tight_out <= tight_in:
             tight_out = tight_in + 1.0
         dur = round(tight_out - tight_in, 2)
@@ -431,25 +449,27 @@ def main():
             "duration": dur,
             "transcript": c.get("transcript", ""),
             "visual_check": c.get("visual_check", "眼神直視鏡頭就緒，無眨眼閉眼"),
-            "audio_check": c.get("audio_check", "緊湊起音與俐落切出")
+            "audio_check": c.get("audio_check", "自然起音與呼吸留白" if args.pacing == "breathing" else "緊湊起音與俐落切出")
         })
 
     temp_wav.unlink(missing_ok=True)
     total_out_dur = round(sum(c["duration"] for c in refined_edl), 2)
     print(f"    初剪片段數: {len(refined_edl)} | 成片預計長度: {total_out_dur:.1f} 秒 (~{total_out_dur/60:.2f} 分鐘)")
 
+    file_tag = f"_{args.pacing}" if args.pacing == "breathing" else ""
+
     # 5. 儲存 JSON
-    json_path = out_dir / f"{base_name}_edl.json"
+    json_path = out_dir / f"{base_name}{file_tag}_edl.json"
     json_path.write_text(json.dumps({
-        "project_title": f"{base_name} AI 初剪",
-        "pacing_style": "compact_subtraction",
+        "project_title": f"{base_name} AI 初剪 ({args.pacing})",
+        "pacing_style": args.pacing,
         "total_duration": total_out_dur,
         "final_edl": refined_edl
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"==> 5. 輸出結構化資料: {json_path.name}")
 
     # 6. 儲存 CSV
-    csv_path = out_dir / f"{base_name}_edl.csv"
+    csv_path = out_dir / f"{base_name}{file_tag}_edl.csv"
     with open(csv_path, "w", encoding="utf-8-sig") as f:
         f.write("Clip_ID,Topic,Source_In,Source_Out,Duration,Transcript,Visual_Check,Audio_Check\n")
         for c in refined_edl:
@@ -460,18 +480,18 @@ def main():
     print(f"==> 6. 輸出表格清單: {csv_path.name}")
 
     # 7. 儲存 FCP 7 XML (Premiere / DaVinci)
-    xml_path = out_dir / f"{base_name}_edl.xml"
+    xml_path = out_dir / f"{base_name}{file_tag}_edl.xml"
     generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps)
     print(f"==> 7. 輸出通用剪輯工程檔: {xml_path.name}")
 
     # 8. 儲存 FCPXML (Final Cut Pro X)
-    fcpxml_path = out_dir / f"{base_name}_edl.fcpxml"
+    fcpxml_path = out_dir / f"{base_name}{file_tag}_edl.fcpxml"
     generate_fcpxml(refined_edl, video_path, total_dur, total_out_dur, fcpxml_path, fps)
     print(f"==> 8. 輸出 Final Cut Pro X 工程檔: {fcpxml_path.name}")
 
     # 9. FFmpeg 渲染成片
-    out_mp4 = out_dir / f"{base_name}_final_cut.mp4"
-    print(f"==> 9. FFmpeg 渲染最終緊湊版成片: {out_mp4.name} ...")
+    out_mp4 = out_dir / f"{base_name}{file_tag}_final_cut.mp4"
+    print(f"==> 9. FFmpeg 渲染{pacing_label}成片: {out_mp4.name} ...")
     render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
     print(f"==> [完成] 最終成片已產出！檔案大小: {out_mp4.stat().st_size / (1024*1024):.1f} MB")
 
