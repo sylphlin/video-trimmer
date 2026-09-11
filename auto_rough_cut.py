@@ -139,16 +139,105 @@ def detect_pre_speech_claps(audio_full, s_in, search_before=2.5, search_after=2.
     return claps
 
 
-def refine_speech_bounds(audio, sr, s_in, s_out, total_dur, pacing="compact"):
+def calculate_clip_cps(transcript, duration):
+    """
+    計算該段落的每秒語速 (CPS: Characters/Syllables Per Second)。
+    中文按漢字數計算，英文/數字按詞與音節權重計算。
+    """
+    zh = len(re.findall(r'[\u4e00-\u9fff]', transcript))
+    en_chars = len(re.findall(r'[a-zA-Z0-9]', transcript))
+    syllables = zh + int(en_chars * 0.6)
+    if syllables == 0:
+        syllables = len(re.sub(r'\s+', '', transcript))
+    dur = max(0.5, duration)
+    return round(syllables / dur, 2), syllables
+
+
+def compute_dynamic_margins(cps, pacing_mode="auto"):
+    """
+    根據語速 CPS 計算最適留白空間：
+    - compact (固定緊湊): In=0.06s, Out=0.08s
+    - breathing (固定呼吸): In=0.35s, Out=0.45s
+    - auto / dynamic (連續動態浮動):
+      CPS >= 5.5 (快節奏新聞/短影音) -> In=0.06s, Out=0.08s
+      CPS <= 4.2 (沉穩慢說書/歷史漫談) -> In=0.35s, Out=0.45s
+      中間進行連續平滑線性插值 (Linear Continuous Interpolation)
+    """
+    if pacing_mode == "compact":
+        return 0.06, 0.08
+    elif pacing_mode == "breathing":
+        return 0.35, 0.45
+
+    # 連續型動態浮動呼吸 (Continuous Dynamic Floating)
+    t = (cps - 4.2) / (5.5 - 4.2)
+    t = max(0.0, min(1.0, t))
+    in_margin = 0.35 - t * (0.35 - 0.06)
+    out_margin = 0.45 - t * (0.45 - 0.08)
+    return round(in_margin, 2), round(out_margin, 2)
+
+
+def find_clean_silence_boundary_in(audio, sr, true_onset, target_in_margin, last_clap=None, ambient_rms_thresh=0.015):
+    """
+    從開口發音點 (true_onset) 往回取留白，但只能在純靜默底噪區延伸。
+    一旦遇到任何突發能量 (拍手、嗶聲、外人口令)，立刻停止回溯。
+    """
+    win = int(0.02 * sr)
+    current_t = true_onset
+    min_allowed_t = true_onset - target_in_margin
+    if last_clap is not None:
+        min_allowed_t = max(min_allowed_t, last_clap + 0.25)
+
+    while current_t > min_allowed_t + 0.005:
+        prev_idx = int((current_t - 0.02) * sr)
+        if prev_idx < 0:
+            break
+        frame = audio[prev_idx : prev_idx + win]
+        rms = np.sqrt(np.mean(frame**2))
+        peak = np.max(np.abs(frame))
+        if rms > ambient_rms_thresh or peak > 0.10:
+            break
+        current_t -= 0.005
+    return max(0.0, current_t)
+
+
+def find_clean_silence_boundary_out(audio, sr, true_offset, target_out_margin, total_dur, ambient_rms_thresh=0.015):
+    """
+    從尾音落點 (true_offset) 往後取留白，但只能在純靜默底噪區延伸。
+    一旦遇到任何突發能量 (導演喊卡、笑場、外人說話)，立刻在該雜音前切出。
+    """
+    win = int(0.02 * sr)
+    current_t = true_offset
+    max_allowed_t = min(total_dur, true_offset + target_out_margin)
+
+    while current_t < max_allowed_t - 0.005:
+        next_idx = int(current_t * sr)
+        if next_idx + win >= len(audio):
+            break
+        frame = audio[next_idx : next_idx + win]
+        rms = np.sqrt(np.mean(frame**2))
+        peak = np.max(np.abs(frame))
+        if rms > ambient_rms_thresh or peak > 0.10:
+            break
+        current_t += 0.005
+    return min(total_dur, current_t)
+
+
+def refine_speech_bounds(audio, sr, s_in, s_out, total_dur, transcript="", pacing="auto"):
     """
     透過音訊 RMS 能量回溯掃描，精確定位字音起訖點，
-    強制建立「拍手打板防護牆（Clap Hard Barrier）」，保證絕對不剪入任何拍手雜音。
+    結合連續型動態浮動呼吸 (CPS) 與純靜默邊界防護，
+    保證 100% 杜絕任何非主講人聲音 (拍手、嗶聲、導演口令)。
     """
-    # 1. 偵測開拍前之拍手打板脈衝
+    # 1. 偵測開拍前之拍手打板脈衝 (作為物理硬防護)
     claps = detect_pre_speech_claps(audio, s_in, search_before=2.5, search_after=2.0, sr=sr)
     last_clap = max(claps) if claps else None
 
-    # 2. 語音能量回溯掃描
+    # 2. 計算動態語速留白
+    raw_dur = max(0.5, s_out - s_in)
+    cps, _ = calculate_clip_cps(transcript, raw_dur)
+    in_margin, out_margin = compute_dynamic_margins(cps, pacing)
+
+    # 3. 語音能量回溯掃描
     start_t = max(0.0, s_in - 2.5)
     end_t = min(total_dur, s_out + 1.0)
     seg = audio[int(start_t * sr):int(end_t * sr)]
@@ -158,15 +247,8 @@ def refine_speech_bounds(audio, sr, s_in, s_out, total_dur, pacing="compact"):
     rms_vals = [np.sqrt(np.mean(seg[i:i + win_len] ** 2)) for i in range(0, len(seg) - win_len, hop_len)]
     t_vals = [start_t + i * 0.005 for i in range(len(rms_vals))]
 
-    threshold = 0.020 if pacing == "breathing" else 0.030
-
     # 尋找真正人聲起訖點（必須嚴格位於最後一記拍手之後）
-    speech_times = []
-    for t, r in zip(t_vals, rms_vals):
-        if last_clap is not None and t < last_clap + 0.20:
-            continue
-        if r > threshold:
-            speech_times.append(t)
+    speech_times = [t for t, r in zip(t_vals, rms_vals) if (last_clap is None or t >= last_clap + 0.20) and r > 0.020]
 
     if speech_times:
         true_onset = speech_times[0]
@@ -175,24 +257,11 @@ def refine_speech_bounds(audio, sr, s_in, s_out, total_dur, pacing="compact"):
         true_onset = s_in
         true_offset = s_out
 
-    if pacing == "breathing":
-        # 呼吸空間模式：開口前 0.35s 乾淨氣息，但絕對不跨越拍手禁區 (last_clap + 0.35s)
-        raw_in = true_onset - 0.35
-        if last_clap is not None:
-            compact_in = max(last_clap + 0.35, raw_in)
-        else:
-            compact_in = max(0.0, raw_in)
-        compact_out = min(total_dur, true_offset + 0.45)
-    else:
-        # 緊湊減法模式：開口前 0.06s，且嚴禁拍手
-        raw_in = true_onset - 0.06
-        if last_clap is not None:
-            compact_in = max(last_clap + 0.15, raw_in)
-        else:
-            compact_in = max(0.0, raw_in)
-        compact_out = min(total_dur, true_offset + 0.06)
+    # 4. 純靜默向外取留白
+    final_in = find_clean_silence_boundary_in(audio, sr, true_onset, in_margin, last_clap)
+    final_out = find_clean_silence_boundary_out(audio, sr, true_offset, out_margin, total_dur)
 
-    return round(compact_in, 2), round(compact_out, 2)
+    return round(final_in, 2), round(final_out, 2), cps, in_margin, out_margin
 
 
 def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976):
@@ -391,8 +460,8 @@ def main():
     parser.add_argument("--output-dir", "-o", default=None, help="輸出資料夾 (預設為影片所在目錄)")
     parser.add_argument("--model", "-m", default="gemini-3.8-flash", help="使用的 Gemini 模型名稱")
     parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 畫質參數 (預設 18)")
-    parser.add_argument("--pacing", "-p", choices=["compact", "breathing"], default="compact",
-                        help="剪輯節奏風格: 'compact' (極致緊湊減法, 適用新聞/科普) 或 'breathing' (呼吸空間留白, 適用慢說書/文化訪談)")
+    parser.add_argument("--pacing", "-p", choices=["auto", "dynamic", "compact", "breathing"], default="auto",
+                        help="剪輯節奏風格: 'auto'/'dynamic' (自適應連續動態浮動, 預設推薦), 'compact' (極致緊湊減法), 'breathing' (呼吸空間留白)")
     args = parser.parse_args()
 
     video_path = Path(args.input).resolve()
@@ -462,8 +531,14 @@ def main():
 
     model_edl = json.loads(raw_json)
 
-    pacing_label = "【呼吸空間模式（Breathing Space）】" if args.pacing == "breathing" else "【緊湊減法模式（Compact Subtraction）】"
-    print(f"==> 4. 抽取音軌進行能量（RMS）全頻譜回溯掃描，套用 {pacing_label}...")
+    if args.pacing in ["auto", "dynamic"]:
+        pacing_label = "【自適應連續動態浮動呼吸模式（Dynamic Floating Pacing）】"
+    elif args.pacing == "breathing":
+        pacing_label = "【呼吸空間模式（Breathing Space）】"
+    else:
+        pacing_label = "【緊湊減法模式（Compact Subtraction）】"
+
+    print(f"==> 4. 抽取音軌進行能量全頻譜掃描，套用 {pacing_label}...")
     temp_wav = out_dir / f"temp_{base_name}.wav"
     subprocess.run(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     audio, sr = sf.read(str(temp_wav))
@@ -478,7 +553,10 @@ def main():
         if s_out <= s_in:
             s_out = max(raw_out, s_in + 1.0)
 
-        tight_in, tight_out = refine_speech_bounds(audio, sr, s_in, s_out, total_dur, pacing=args.pacing)
+        transcript = c.get("transcript", "") or c.get("content", "")
+        tight_in, tight_out, clip_cps, in_m, out_m = refine_speech_bounds(
+            audio, sr, s_in, s_out, total_dur, transcript=transcript, pacing=args.pacing
+        )
         if tight_out <= tight_in:
             tight_out = tight_in + 1.0
         dur = round(tight_out - tight_in, 2)
@@ -488,22 +566,28 @@ def main():
             "source_in": tight_in,
             "source_out": tight_out,
             "duration": dur,
-            "transcript": c.get("transcript", ""),
+            "cps": clip_cps,
+            "in_margin": in_m,
+            "out_margin": out_m,
+            "transcript": transcript,
             "visual_check": c.get("visual_check", "眼神直視鏡頭就緒，無眨眼閉眼"),
-            "audio_check": c.get("audio_check", "自然起音與呼吸留白" if args.pacing == "breathing" else "緊湊起音與俐落切出")
+            "audio_check": c.get("audio_check", f"CPS={clip_cps:.2f} 字/秒 (In留白={in_m:.2f}s, Out留白={out_m:.2f}s, 純靜默邊界)")
         })
+        print(f"    Clip {c['clip_id']:2d}: In={tight_in:6.2f}s, Out={tight_out:6.2f}s ({dur:5.2f}s) | CPS={clip_cps:4.2f} (In={in_m:.2f}s, Out={out_m:.2f}s) | {c['topic']}")
 
     temp_wav.unlink(missing_ok=True)
     total_out_dur = round(sum(c["duration"] for c in refined_edl), 2)
-    print(f"    初剪片段數: {len(refined_edl)} | 成片預計長度: {total_out_dur:.1f} 秒 (~{total_out_dur/60:.2f} 分鐘)")
+    avg_cps = round(sum(c["cps"] for c in refined_edl) / max(1, len(refined_edl)), 2)
+    print(f"    初剪片段數: {len(refined_edl)} | 成片預計長度: {total_out_dur:.1f} 秒 (~{total_out_dur/60:.2f} 分鐘) | 全片平均語速: {avg_cps:.2f} 字/秒")
 
-    file_tag = f"_{args.pacing}" if args.pacing == "breathing" else ""
+    file_tag = f"_{args.pacing}" if args.pacing != "compact" else ""
 
     # 5. 儲存 JSON
     json_path = out_dir / f"{base_name}{file_tag}_edl.json"
     json_path.write_text(json.dumps({
         "project_title": f"{base_name} AI 初剪 ({args.pacing})",
         "pacing_style": args.pacing,
+        "average_cps": avg_cps,
         "total_duration": total_out_dur,
         "final_edl": refined_edl
     }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -512,12 +596,12 @@ def main():
     # 6. 儲存 CSV
     csv_path = out_dir / f"{base_name}{file_tag}_edl.csv"
     with open(csv_path, "w", encoding="utf-8-sig") as f:
-        f.write("Clip_ID,Topic,Source_In,Source_Out,Duration,Transcript,Visual_Check,Audio_Check\n")
+        f.write("Clip_ID,Topic,Source_In,Source_Out,Duration,CPS,In_Margin,Out_Margin,Transcript,Visual_Check,Audio_Check\n")
         for c in refined_edl:
             tr = c["transcript"].replace('"', '""')
             vc = c["visual_check"].replace('"', '""')
             ac = c["audio_check"].replace('"', '""')
-            f.write(f'{c["clip_id"]},"{c["topic"]}",{c["source_in"]:.2f},{c["source_out"]:.2f},{c["duration"]:.2f},"{tr}","{vc}","{ac}"\n')
+            f.write(f'{c["clip_id"]},"{c["topic"]}",{c["source_in"]:.2f},{c["source_out"]:.2f},{c["duration"]:.2f},{c["cps"]:.2f},{c["in_margin"]:.2f},{c["out_margin"]:.2f},"{tr}","{vc}","{ac}"\n')
     print(f"==> 6. 輸出表格清單: {csv_path.name}")
 
     # 7. 儲存 FCP 7 XML (Premiere / DaVinci)

@@ -84,24 +84,32 @@ echo 'GEMINI_API_KEY="你的_GEMINI_API_KEY"' >> ~/.gemini/.env
 python auto_rough_cut.py --input "/path/to/your_video.mp4"
 ```
 
-### 雙剪輯節奏風格支援 (`--pacing`)
+### 剪輯節奏風格支援 (`--pacing`)
 
-系統支援依講者語速與內容屬性自由切換兩種剪輯節奏：
+系統支援「自適應語速動態浮動（Dynamic Floating Pacing，預設推薦）」以及手動指定風格：
 
-* **`compact`（緊湊減法模式，預設）**：
+* **`auto` / `dynamic`（連續型動態浮動呼吸，預設推薦）**：
+  * **原理**：系統自動分析每段台詞的語速 **CPS（每秒字數/音節數）**，透過連續插值公式動態計算最適留白：
+    * 遇快口播（CPS ≥ 5.5，如科技快報、短影音）：自動收緊至 In=0.06s / Out=0.08s 俐落切出。
+    * 遇慢說書（CPS ≤ 4.2，如工頭堅歷史漫談）：自動放寬至 In=0.35s / Out=0.45s 飽滿呼吸感。
+  * **純靜默邊界防護（Silence-Only Boundary）**：呼吸留白只取自主講人開口前的純淨環境底噪，逐幀檢驗能量；若回溯過程遇到任何突發雜訊（拍手打板、相機提示嗶聲、導演喊話『來！』），刀口立即止步於該雜訊之後的靜默區，**100% 杜絕場外音與拍手**！
+* **`compact`（緊湊減法模式）**：
   * 適用：泛科學新聞、快節奏科普短影音、高密度口播。
-  * 特色：落音即切（+0.06s）、開口微氣息（-0.06s），段落間隔約 **0.15 ~ 0.25 秒**，一氣呵成。
-* **`breathing`（呼吸空間模式）**：
-  * 適用：工頭堅、文化歷史、慢說書、深度人物訪談、紀錄片。
-  * 特色：保留開口前自然吸氣與眼神定格（-0.28s）、句尾留白沉澱餘韻（+0.45s），段落間隔約 **0.70 ~ 1.00 秒**，完整保護慢語速字音與微表情，避免話音未落即硬切的突兀感。
+  * 特色：落音即切（+0.08s）、開口微氣息（-0.06s），段落間隔約 **0.15 ~ 0.25 秒**，一氣呵成。
+* **`breathing`（固定呼吸空間模式）**：
+  * 適用：文化歷史、慢說書、深度人物訪談、紀錄片。
+  * 特色：固定保留開口前 0.35s 氣息與眼神定格、句尾留白 0.45s 沉澱餘韻，段落間隔約 **0.70 ~ 0.90 秒**。
 
 ### 常用指令範例
 
 ```bash
-# 1. 緊湊減法模式 (泛科學新聞快節奏)
+# 1. 自適應動態呼吸模式 (預設推薦，AI 根據語速自動微調每段留白，純靜默防護)
+python auto_rough_cut.py --input "工頭堅/take 1_1080p.mp4"
+
+# 2. 強制緊湊減法模式 (泛科學新聞快節奏)
 python auto_rough_cut.py --input "take 2_1080p.mp4" --pacing compact
 
-# 2. 呼吸空間模式 (工頭堅文化漫談慢節奏)
+# 3. 強制固定呼吸模式 (慢節奏人文訪談)
 python auto_rough_cut.py --input "工頭堅/take 1_1080p.mp4" --pacing breathing
 ```
 
@@ -111,7 +119,7 @@ python auto_rough_cut.py --input "工頭堅/take 1_1080p.mp4" --pacing breathing
 python auto_rough_cut.py \
   --input "video.mp4" \              # 輸入影片路徑 (必填)
   --output-dir "./output" \          # 輸出資料夾 (預設為影片所在同目錄)
-  --pacing breathing \               # 節奏風格: 'compact' (預設) 或 'breathing'
+  --pacing auto \                    # 節奏風格: 'auto' (預設動態), 'compact', 'breathing'
   --model "gemini-3.8-flash" \       # 指定模型 (預設 gemini-3.8-flash)
   --crf 18                           # 渲染畫質參數 (CRF 18 為視覺無損)
 ```
