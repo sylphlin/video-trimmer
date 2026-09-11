@@ -497,6 +497,8 @@ def main():
     parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 畫質參數 (預設 18)")
     parser.add_argument("--pacing", "-p", choices=["auto", "dynamic", "compact", "breathing"], default="auto",
                         help="剪輯節奏風格: 'auto'/'dynamic' (自適應連續動態浮動, 預設推薦), 'compact' (極致緊湊減法), 'breathing' (呼吸空間留白)")
+    parser.add_argument("--cached-json", default=None,
+                        help="指定既有之初剪決策 JSON 檔案路徑，跳過 Gemini 上傳與雲端分析 (便於快速微調留白與重渲染)")
     args = parser.parse_args()
 
     video_path = Path(args.input).resolve()
@@ -508,63 +510,72 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     base_name = video_path.stem
 
-    load_gemini_api_key()
-    client = genai.Client()
-
     print(f"==> 1. 檢測影片資訊: {video_path.name}")
     total_dur, width, height, fps = probe_video(video_path)
     print(f"    時長: {total_dur:.1f} 秒 (~{total_dur/60:.1f} 分鐘) | 解析度: {width}x{height} | 幀率: {fps:.3f} fps")
 
-    # 讀取 Markdown 格式提示詞
-    prompt_file = Path(__file__).parent / "prompts" / "video_cut_prompt.md"
-    if prompt_file.exists():
-        prompt = prompt_file.read_text(encoding="utf-8")
+    if args.cached_json:
+        cached_file = Path(args.cached_json).resolve()
+        if not cached_file.exists():
+            print(f"錯誤: 找不到快取 JSON 檔案: {cached_file}")
+            sys.exit(1)
+        print(f"==> 2. 跳過 Gemini 模型分析，直接載入快取初剪決策: {cached_file.name}")
+        with open(cached_file, "r", encoding="utf-8") as f:
+            model_edl = json.load(f)
     else:
-        print("未找到 prompts/video_cut_prompt.md，請確認專案結構完整。")
-        sys.exit(1)
+        load_gemini_api_key()
+        client = genai.Client()
 
-    print(f"==> 2. 上傳影片至 Gemini Files API ({video_path.stat().st_size / (1024*1024):.1f} MB)...")
-    t0 = time.time()
-    video_file = client.files.upload(file=str(video_path))
-    print(f"    上傳完畢 (耗時 {time.time() - t0:.1f} 秒)。等待雲端轉碼 ACTIVE...")
+        # 讀取 Markdown 格式提示詞
+        prompt_file = Path(__file__).parent / "prompts" / "video_cut_prompt.md"
+        if prompt_file.exists():
+            prompt = prompt_file.read_text(encoding="utf-8")
+        else:
+            print("未找到 prompts/video_cut_prompt.md，請確認專案結構完整。")
+            sys.exit(1)
 
-    while video_file.state.name == "PROCESSING":
-        time.sleep(3)
-        video_file = client.files.get(name=video_file.name)
+        print(f"==> 2. 上傳影片至 Gemini Files API ({video_path.stat().st_size / (1024*1024):.1f} MB)...")
+        t0 = time.time()
+        video_file = client.files.upload(file=str(video_path))
+        print(f"    上傳完畢 (耗時 {time.time() - t0:.1f} 秒)。等待雲端轉碼 ACTIVE...")
 
-    if video_file.state.name != "ACTIVE":
-        print(f"Gemini 處理失敗: {video_file.state.name}")
-        sys.exit(1)
+        while video_file.state.name == "PROCESSING":
+            time.sleep(3)
+            video_file = client.files.get(name=video_file.name)
 
-    print(f"==> 3. 調用 {args.model} 進行多模態視訊理解與初剪決策...")
-    t1 = time.time()
-    response = client.models.generate_content(
-        model=args.model,
-        contents=[video_file, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.0,
-            max_output_tokens=8192
+        if video_file.state.name != "ACTIVE":
+            print(f"Gemini 處理失敗: {video_file.state.name}")
+            sys.exit(1)
+
+        print(f"==> 3. 調用 {args.model} 進行多模態視訊理解與初剪決策...")
+        t1 = time.time()
+        response = client.models.generate_content(
+            model=args.model,
+            contents=[video_file, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.0,
+                max_output_tokens=8192
+            )
         )
-    )
-    print(f"    模型分析完成 (耗時 {time.time() - t1:.1f} 秒)！")
+        print(f"    模型分析完成 (耗時 {time.time() - t1:.1f} 秒)！")
 
-    # 清理遠端檔案
-    try:
-        client.files.delete(name=video_file.name)
-    except Exception:
-        pass
+        # 清理遠端檔案
+        try:
+            client.files.delete(name=video_file.name)
+        except Exception:
+            pass
 
-    raw_json = response.text.strip()
-    if raw_json.startswith("```json"):
-        raw_json = raw_json[7:]
-    if raw_json.startswith("```"):
-        raw_json = raw_json[3:]
-    if raw_json.endswith("```"):
-        raw_json = raw_json[:-3]
-    raw_json = raw_json.strip()
+        raw_json = response.text.strip()
+        if raw_json.startswith("```json"):
+            raw_json = raw_json[7:]
+        if raw_json.startswith("```"):
+            raw_json = raw_json[3:]
+        if raw_json.endswith("```"):
+            raw_json = raw_json[:-3]
+        raw_json = raw_json.strip()
 
-    model_edl = json.loads(raw_json)
+        model_edl = json.loads(raw_json)
 
     if args.pacing in ["auto", "dynamic"]:
         pacing_label = "【自適應連續動態浮動呼吸模式（Dynamic Floating Pacing）】"
