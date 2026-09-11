@@ -27,20 +27,37 @@ except ImportError as e:
 
 
 def load_gemini_api_key():
-    """載入 Gemini API Key，優先檢查環境變數，次之檢查 ~/.gemini/.env"""
+    """載入 Gemini API Key，優先檢查環境變數，次之檢查本機 .env，再次之檢查 ~/.gemini/.env"""
     if os.environ.get("GEMINI_API_KEY"):
         return os.environ["GEMINI_API_KEY"]
     
-    env_file = Path.home() / ".gemini" / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("GEMINI_API_KEY="):
-                key = line.split("=", 1)[1].strip("\"'")
-                os.environ["GEMINI_API_KEY"] = key
-                return key
+    # 檢查當前目錄與專案目錄的 .env
+    for candidate in [Path.cwd() / ".env", Path(__file__).parent / ".env"]:
+        try:
+            if candidate.exists():
+                for line in candidate.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("GEMINI_API_KEY="):
+                        key = line.split("=", 1)[1].strip("\"'")
+                        os.environ["GEMINI_API_KEY"] = key
+                        return key
+        except Exception:
+            pass
+
+    # 檢查 ~/.gemini/.env
+    try:
+        env_file = Path.home() / ".gemini" / ".env"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("GEMINI_API_KEY="):
+                    key = line.split("=", 1)[1].strip("\"'")
+                    os.environ["GEMINI_API_KEY"] = key
+                    return key
+    except Exception:
+        pass
     
-    print("錯誤: 未找到 GEMINI_API_KEY！請設置環境變數或建立 ~/.gemini/.env")
+    print("錯誤: 未找到 GEMINI_API_KEY！請設置環境變數或建立 .env 檔案")
     sys.exit(1)
 
 
@@ -76,27 +93,14 @@ def mmss_to_sec(val):
     return m * 60 + s
 
 
-def resolve_timestamp(raw_val, audio, sr, total_dur):
+def resolve_timestamp(raw_val, total_dur):
     """
-    智能判定時間戳：比對 raw_val 與 mmss_to_sec 轉換值，若 raw 超過總長直接轉換；
-    若兩者皆在時長內，比對該時間點附近的語音能量 (RMS)，自動選擇語音更明確的時間戳。
+    智能判定時間戳：
+    僅當模型輸出之數值大於影片總長度時，判定為 mm*100+ss 格式 (例如 1241.0 代表 12分41秒)。
+    若數值在片長內，代表已經是絕對秒數，直接保留。
     """
     if raw_val > total_dur:
         return mmss_to_sec(raw_val)
-    
-    # 若大於 100 且個位十位小於 60，有可能是 mm*100+ss
-    if raw_val >= 100 and (int(raw_val) % 100 < 60):
-        converted = mmss_to_sec(raw_val)
-        if converted < total_dur:
-            def get_rms(t):
-                s = max(0, int((t - 0.1) * sr))
-                e = min(len(audio), int((t + 0.8) * sr))
-                if e <= s: return 0.0
-                return float(np.sqrt(np.mean(audio[s:e] ** 2)))
-            rms_raw = get_rms(raw_val)
-            rms_conv = get_rms(converted)
-            if rms_conv > 0.025 and rms_conv > rms_raw * 1.5:
-                return converted
     return raw_val
 
 
@@ -400,11 +404,15 @@ def main():
     for c in model_edl.get("final_edl", []):
         raw_in = c["source_in"]
         raw_out = c["source_out"]
-        # 智能解析時間戳 (自動比對 raw 秒數與 mm:ss 換算之能量)
-        s_in = resolve_timestamp(raw_in, audio, sr, total_dur)
-        s_out = resolve_timestamp(raw_out, audio, sr, total_dur)
+        # 智能解析時間戳 (僅當數值超過總長時才轉 mm:ss)
+        s_in = resolve_timestamp(raw_in, total_dur)
+        s_out = resolve_timestamp(raw_out, total_dur)
+        if s_out <= s_in:
+            s_out = max(raw_out, s_in + 1.0)
 
         tight_in, tight_out = refine_speech_bounds(audio, sr, s_in, s_out, total_dur)
+        if tight_out <= tight_in:
+            tight_out = tight_in + 1.0
         dur = round(tight_out - tight_in, 2)
         refined_edl.append({
             "clip_id": c["clip_id"],
