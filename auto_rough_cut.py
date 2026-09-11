@@ -201,33 +201,64 @@ def find_clean_silence_boundary_in(audio, sr, true_onset, target_in_margin, last
     return max(0.0, current_t)
 
 
-def find_clean_silence_boundary_out(audio, sr, true_offset, target_out_margin, total_dur, ambient_rms_thresh=0.015):
+def find_speech_decay_end(audio, sr, last_strong_t, max_decay_search=0.35, decay_rms_thresh=0.006):
     """
-    從尾音落點 (true_offset) 往後取留白，但只能在純靜默底噪區延伸。
-    一旦遇到任何突發能量 (導演喊卡、笑場、外人說話)，立刻在該雜音前切出。
+    從最後一個強發音點 (RMS > 0.02) 向後追蹤字音的物理自然衰減 (Decay)，
+    直到能量真正回落至環境底噪基準，確保字尾收音完整不被切斷。
     """
     win = int(0.02 * sr)
-    current_t = true_offset
-    max_allowed_t = min(total_dur, true_offset + target_out_margin)
+    t = last_strong_t
+    max_t = min(len(audio) / sr, last_strong_t + max_decay_search)
 
-    while current_t < max_allowed_t - 0.005:
-        next_idx = int(current_t * sr)
-        if next_idx + win >= len(audio):
+    while t < max_t:
+        idx = int(t * sr)
+        if idx + win >= len(audio):
             break
-        frame = audio[next_idx : next_idx + win]
+        frame = audio[idx : idx + win]
+        rms = np.sqrt(np.mean(frame**2))
+        if rms < decay_rms_thresh:
+            # 雙重驗證：確認後續 30ms 也是安靜的，避免短暫輔音或唇齒間隙誤判
+            idx_next = idx + int(0.03 * sr)
+            if idx_next + win < len(audio):
+                frame_next = audio[idx_next : idx_next + win]
+                if np.sqrt(np.mean(frame_next**2)) < decay_rms_thresh:
+                    return t
+        t += 0.005
+    return min(max_t, t)
+
+
+def find_clean_silence_boundary_out(audio, sr, speech_decay_end, target_out_margin, total_dur, voice_burst_thresh=0.035):
+    """
+    從尾音自然衰減結束點 (speech_decay_end) 往後保留表情沉澱與放鬆留白。
+    僅防禦外人突發插話 (例如導演大喊『卡！』、『好！』或工作人員插嘴)：
+    若在留白區間內偵測到新發音能量爆發，則在該雜音前 50ms 提前下刀切出；
+    若環境為正常底噪，則 100% 賦予完整的動態留白。
+    """
+    win = int(0.02 * sr)
+    max_allowed_t = min(total_dur, speech_decay_end + target_out_margin)
+    # 衰減點後 50ms 避開殘存微氣流
+    t = speech_decay_end + 0.05
+
+    while t < max_allowed_t:
+        idx = int(t * sr)
+        if idx + win >= len(audio):
+            break
+        frame = audio[idx : idx + win]
         rms = np.sqrt(np.mean(frame**2))
         peak = np.max(np.abs(frame))
-        if rms > ambient_rms_thresh or peak > 0.10:
-            break
-        current_t += 0.005
-    return min(total_dur, current_t)
+        # 僅在偵測到明顯外人講話 / 拍手脈衝時提前切出
+        if rms > voice_burst_thresh or peak > 0.20:
+            return max(speech_decay_end + 0.05, t - 0.05)
+        t += 0.005
+    return max_allowed_t
 
 
 def refine_speech_bounds(audio, sr, s_in, s_out, total_dur, transcript="", pacing="auto"):
     """
     透過音訊 RMS 能量回溯掃描，精確定位字音起訖點，
     結合連續型動態浮動呼吸 (CPS) 與純靜默邊界防護，
-    保證 100% 杜絕任何非主講人聲音 (拍手、嗶聲、導演口令)。
+    保證 100% 杜絕任何非主講人聲音 (拍手、嗶聲、導演口令)，
+    並完整保護字尾自然消退期與微表情餘韻。
     """
     # 1. 偵測開拍前之拍手打板脈衝 (作為物理硬防護)
     claps = detect_pre_speech_claps(audio, s_in, search_before=2.5, search_after=2.0, sr=sr)
@@ -253,14 +284,17 @@ def refine_speech_bounds(audio, sr, s_in, s_out, total_dur, transcript="", pacin
 
     if speech_times:
         true_onset = speech_times[0]
-        true_offset = speech_times[-1]
+        last_strong_speech = speech_times[-1]
     else:
         true_onset = s_in
-        true_offset = s_out
+        last_strong_speech = s_out
+
+    # 追蹤最後字音的自然衰減，直到沉入環境底噪
+    speech_decay_end = find_speech_decay_end(audio, sr, last_strong_speech)
 
     # 4. 純靜默向外取留白
     final_in = find_clean_silence_boundary_in(audio, sr, true_onset, in_margin, last_clap)
-    final_out = find_clean_silence_boundary_out(audio, sr, true_offset, out_margin, total_dur)
+    final_out = find_clean_silence_boundary_out(audio, sr, speech_decay_end, out_margin, total_dur)
 
     return round(final_in, 2), round(final_out, 2), cps, in_margin, out_margin
 
