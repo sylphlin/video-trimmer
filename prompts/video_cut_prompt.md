@@ -13,15 +13,15 @@
 * 前面的 NG 嘗試全部標記為捨棄。
 
 ### 二、 文字剪輯與 Whisper 聲學時間鎖定（Text-Based Editing with Ground-Truth）
-本系統在分析視訊前，已透過微觀語音模型（Whisper）完成全片毫秒級的字級時間戳轉錄（見提示詞末尾之「Whisper 劇本清單」）。
+本系統在分析視訊前，已透過微觀語音模型（Whisper）完成全片毫秒級轉錄，並已依據語意與自然換氣停頓合併為完整語意表達的「Sentence 劇本清單」（見提示詞末尾）。
 * **嚴格比照專業剪輯軟體（如 Premiere Pro / DaVinci Resolve）之「文字剪輯（Text-Based Editing）」標準**：
   1. 請比對畫面中講者的表現（眼神直視、表情生動、手勢到位、無講錯笑場），挑選出表現最好的正式 Take。
-  2. 每個入選片段，請務必直接引用 Whisper 劇本清單中的 **`start_segment_id`** 與 **`end_segment_id`**！
-  3. `source_in` 請直接填入該起始 segment 的精確 `start` 時間；`source_out` 請直接填入該結束 segment 的精確 `end` 時間！
+  2. 每個入選片段，請務必直接引用劇本清單中的 **`start_sentence_id`** 與 **`end_sentence_id`**（亦相容 `start_segment_id`/`end_segment_id`）！
+  3. `source_in` 請直接填入該起始句子的精確 `start` 時間；`source_out` 請直接填入該結束句子的精確 `end` 時間！
   4. **嚴格禁止自行估算時間**：後續系統將以 Whisper 聲學物理時間為準進行無損下刀，徹底根絕切字問題！
 
 ### 三、 徹底剔除「非主講人正片內容」（Strict Presenter Only）
-1. **主講人唯一性**：畫面中唯一的目標主講人為唯一合法人聲。任何畫外音（導演口令、拍手、嗶嗶聲、工作人員交談）均屬於無效噪音，嚴禁包含在成片中。
+1. **主講人唯一性**：畫面中唯一的目標主講人為唯一合法人聲。任何畫外音（導演口令、拍手、嗶嗶聲、工作人員交談、錄完閒聊）均屬於無效噪音，嚴禁包含在成片中。
 2. **開口前與講完後之雜談排除**：開口前的清喉嚨、試音、以及講完後的『這段可以嗎？』看導演確認，一律排除。
 
 ### 四、 視覺就緒與微表情約束（Visual Readiness & Blink Avoidance）
@@ -46,15 +46,15 @@
     {
       "clip_id": 1,
       "topic": "段落主題",
-      "start_segment_id": 12,
-      "end_segment_id": 19,
+      "start_sentence_id": 4,
+      "end_sentence_id": 4,
       "source_in": 33.04,
       "source_out": 51.90,
       "duration": 18.86,
       "transcript": "該段講述的具體口白文字",
       "take_selection_reason": "說明選擇此 Take 的原因（例如：第三次嘗試最完整流暢，無卡詞且眼神堅定）",
       "visual_check": "視覺就緒說明：確認眼神直視鏡頭、無閉眼眨眼、肢體穩定",
-      "audio_check": "聽覺檢查說明：對應 Whisper Seg 12-19，首字開口起音、尾字完整收音"
+      "audio_check": "聽覺檢查說明：對應 Whisper Sentence 4，首字開口起音、尾字完整收音"
     }
   ]
 }

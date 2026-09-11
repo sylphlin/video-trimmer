@@ -103,14 +103,14 @@ python auto_rough_cut.py --input "/path/to/your_video.mp4"
 ### 常用指令範例
 
 ```bash
-# 1. 自適應動態呼吸模式 (預設推薦，AI 根據語速自動微調每段留白，純靜默防護)
-python auto_rough_cut.py --input "工頭堅/take 1_1080p.mp4"
+# 1. 自適應動態呼吸模式 (預設靜態抽幀 + Whisper 語意句子合併)
+python auto_rough_cut.py --input "take 1_1080p.mp4"
 
-# 2. 強制緊湊減法模式 (泛科學新聞快節奏)
-python auto_rough_cut.py --input "take 2_1080p.mp4" --pacing compact
+# 2. 🤖 啟用 Agentic Video Understanding 動態探索模式 (推薦長片與雜訊複雜環境)
+python auto_rough_cut.py --input "take 1_1080p.mp4" --agentic
 
-# 3. 強制固定呼吸模式 (慢節奏人文訪談)
-python auto_rough_cut.py --input "工頭堅/take 1_1080p.mp4" --pacing breathing
+# 3. 指定輸出標籤與緊湊減法模式
+python auto_rough_cut.py --input "take 1_1080p.mp4" --agentic --suffix "agentic_test" --pacing compact
 ```
 
 ### 完整參數說明
@@ -119,19 +119,24 @@ python auto_rough_cut.py --input "工頭堅/take 1_1080p.mp4" --pacing breathing
 python auto_rough_cut.py \
   --input "video.mp4" \              # 輸入影片路徑 (必填)
   --output-dir "./output" \          # 輸出資料夾 (預設為影片所在同目錄)
+  --agentic \                        # 啟用 Google Interactions API 原生 Agentic 視訊動態探索
+  --suffix "my_cut" \                # 自訂輸出檔案標籤 (如 _my_cut_edl.json)
   --pacing auto \                    # 節奏風格: 'auto' (預設動態), 'compact', 'breathing'
   --model "gemini-3.8-flash" \       # 指定模型 (預設 gemini-3.8-flash)
+  --script "script.txt" \            # 附帶參考分鏡講稿 (可選)
+  --skip-whisper \                   # 跳過 Whisper 聲學對齊 (僅測試時使用)
   --crf 18                           # 渲染畫質參數 (CRF 18 為視覺無損)
 ```
 
 ### 產出檔案
 
-執行後將在輸出目錄自動產生 5 個核心檔案：
-1. **`<檔名>_final_cut.mp4`**：緊湊連續版成片（音訊邊緣自動套用 15ms 抗爆音微淡化）。
-2. **`<檔名>_edl.xml`**：通用 FCP 7 XML 剪輯工程檔（供 Premiere Pro、DaVinci Resolve 使用）。
-3. **`<檔名>_edl.fcpxml`**：FCPXML 格式（供 Final Cut Pro X 使用）。
-4. **`<檔名>_edl.json`**：包含每段講述口白、視覺就緒審查與時間戳的結構化資料。
-5. **`<檔名>_edl.csv`**：供 Excel / Numbers 檢視的剪輯清單。
+執行後將在輸出目錄自動產生核心檔案：
+1. **`<檔名>_<tag>_rough_cut.mp4`**：緊湊連續版成片（音訊邊緣自動套用 15ms 抗爆音微淡化）。
+2. **`<檔名>_<tag>_edl.xml`**：通用 FCP 7 XML 剪輯工程檔（供 Premiere Pro、DaVinci Resolve 使用）。
+3. **`<檔名>_<tag>_edl.fcpxml`**：FCPXML 格式（供 Final Cut Pro X 使用）。
+4. **`<檔名>_<tag>_edl.json`**：包含每段講述口白、視覺就緒審查、Token 統計與精準時間戳的結構化資料。
+5. **`<檔名>_<tag>_edl.csv`**：供 Excel / Numbers 檢視的剪輯清單。
+6. **`<檔名>_whisper_sentences.json`**：Whisper 微觀字級對齊後的語意句子完整劇本。
 
 ---
 

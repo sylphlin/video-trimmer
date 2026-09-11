@@ -159,69 +159,156 @@ def calculate_clip_cps(transcript, duration):
     return round(syllables / dur, 2), syllables
 
 
+def merge_whisper_segments_to_sentences(segments, max_gap=0.55, max_sentence_dur=20.0):
+    """
+    將 Whisper 零碎的聲學 Segments 依據自然換氣停頓與語法標點合併為完整語意句子。
+    完整保留底層每個單詞的字級時間戳 (word_timestamps)，
+    讓大模型在更高層級的完整語意單元 (Sentence/Take) 上進行挑選，杜絕漏選半截話或語意腰斬。
+    """
+    if not segments:
+        return []
+
+    CLOSURE_PUNCT = ('。', '！', '？', '!', '?', '……', '...')
+    CONJUNCTIONS = ('但是', '而且', '所以', '然而', '如果', '因為', '不過', '雖然', '或是', '或者')
+
+    sentences = []
+    curr = None
+
+    for s in segments:
+        s_text = s['text'].strip()
+        s_start = s['start']
+        s_end = s['end']
+        s_words = s.get('words', [])
+
+        if curr is None:
+            curr = {
+                'id': 1,
+                'start': s_start,
+                'end': s_end,
+                'text': s_text,
+                'words': list(s_words),
+                'orig_segment_ids': [s['id']]
+            }
+            continue
+
+        gap = s_start - curr['end']
+        curr_text = curr['text'].strip()
+        dur = s_end - curr['start']
+
+        should_split = False
+        # 1. 物理換氣/停頓明顯 (gap >= 0.55s)
+        if gap >= max_gap:
+            should_split = True
+        # 2. 句子長度已很長且有適度微停頓
+        elif dur >= max_sentence_dur and gap >= 0.25:
+            should_split = True
+        # 3. 句尾標點閉合且微停頓
+        elif any(curr_text.endswith(p) for p in CLOSURE_PUNCT) and gap >= 0.20:
+            should_split = True
+
+        # 連詞防斷保護 (若下個片段開頭是連詞，且未發生極長停頓，強制黏合)
+        if should_split and gap < 0.90:
+            if any(s_text.startswith(c) for c in CONJUNCTIONS):
+                should_split = False
+
+        if should_split:
+            sentences.append(curr)
+            curr = {
+                'id': len(sentences) + 1,
+                'start': s_start,
+                'end': s_end,
+                'text': s_text,
+                'words': list(s_words),
+                'orig_segment_ids': [s['id']]
+            }
+        else:
+            curr['end'] = s_end
+            curr['text'] = curr['text'] + ' ' + s_text if not curr['text'].endswith((' ', '，', '。')) else curr['text'] + s_text
+            curr['words'].extend(s_words)
+            curr['orig_segment_ids'].append(s['id'])
+
+    if curr is not None:
+        sentences.append(curr)
+
+    return sentences
+
+
 def transcribe_video_whisper(video_path, out_json_path, model_name="small"):
     """
     第一階段：微觀聲學時間戳對齊 (Word-level Ground Truth)
     在調用大模型之前，先在本地以 Whisper 生成帶有毫秒級字級時間戳的結構化劇本。
+    返回: (raw_segments, merged_sentences)
     """
     out_json = Path(out_json_path)
+    sentences_json = out_json.parent / f"{video_path.stem}_whisper_sentences.json"
+
+    raw_results = []
     if out_json.exists():
         print(f"    載入既有之 Whisper 聲學時間戳: {out_json.name}")
         with open(out_json, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw_results = json.load(f)
+    elif HAS_WHISPER:
+        print(f"    本地調用 faster-whisper ({model_name}) 進行微觀字級時間戳轉錄...")
+        temp_wav = out_json.parent / f"temp_{video_path.stem}_whisper.wav"
+        subprocess.run([
+            "ffmpeg", "-y", "-i", str(video_path),
+            "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    if not HAS_WHISPER:
+        model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh")
+
+        for i, s in enumerate(segments):
+            words_data = []
+            if s.words:
+                for w in s.words:
+                    words_data.append({
+                        "word": w.word.strip(),
+                        "start": round(w.start, 2),
+                        "end": round(w.end, 2)
+                    })
+            raw_results.append({
+                "id": i + 1,
+                "start": round(s.start, 2),
+                "end": round(s.end, 2),
+                "text": s.text.strip(),
+                "words": words_data
+            })
+
+        temp_wav.unlink(missing_ok=True)
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(raw_results, f, ensure_ascii=False, indent=2)
+        print(f"    Whisper 轉錄完畢，共解析出 {len(raw_results)} 個高精度時間戳片段。")
+    else:
         print("    [提示] 未安裝 faster-whisper，跳過本地字級轉錄。")
-        return []
+        return [], []
 
-    print(f"    本地調用 faster-whisper ({model_name}) 進行微觀字級時間戳轉錄...")
-    temp_wav = out_json.parent / f"temp_{video_path.stem}_whisper.wav"
-    subprocess.run([
-        "ffmpeg", "-y", "-i", str(video_path),
-        "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # 執行語意句子合併
+    if sentences_json.exists():
+        with open(sentences_json, "r", encoding="utf-8") as f:
+            sentences = json.load(f)
+        print(f"    載入既有之語意句子劇本: {sentences_json.name} ({len(sentences)} 句)")
+    else:
+        sentences = merge_whisper_segments_to_sentences(raw_results)
+        with open(sentences_json, "w", encoding="utf-8") as f:
+            json.dump(sentences, f, ensure_ascii=False, indent=2)
+        print(f"    語意合併完成：從 {len(raw_results)} 個聲學碎片濃縮為 {len(sentences)} 個完整語意句子！")
 
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh")
-
-    results = []
-    for i, s in enumerate(segments):
-        words_data = []
-        if s.words:
-            for w in s.words:
-                words_data.append({
-                    "word": w.word.strip(),
-                    "start": round(w.start, 2),
-                    "end": round(w.end, 2)
-                })
-        results.append({
-            "id": i + 1,
-            "start": round(s.start, 2),
-            "end": round(s.end, 2),
-            "text": s.text.strip(),
-            "words": words_data
-        })
-
-    temp_wav.unlink(missing_ok=True)
-    with open(out_json, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-
-    print(f"    Whisper 轉錄完畢，共解析出 {len(results)} 個高精度時間戳片段。")
-    return results
+    return raw_results, sentences
 
 
-def format_whisper_transcript_for_prompt(whisper_segs):
-    """將 Whisper 片段格式化為 Gemini 提示詞專用的文字剪輯清單"""
+def format_whisper_transcript_for_prompt(whisper_sentences):
+    """將 Whisper 合併後的語意句子格式化為 Gemini 提示詞專用的文字剪輯清單"""
     lines = [
         "\n---",
-        "## Whisper 微觀字級時間戳劇本 (Ground-Truth Segments)",
-        "以下是由本地微觀語音模型對本片進行的逐句時間戳轉錄清單。",
-        "每個 Segment 均包含精確起訖秒數（start -> end）。",
-        "請在輸出 final_edl 時，直接引用選定片段對應的 `start_segment_id` 與 `end_segment_id`，",
-        "並將 `source_in` 與 `source_out` 對齊該 segment 之起訖時間（嚴禁自行粗估時間碼）：\n"
+        "## Whisper 語意句子時間戳劇本 (Ground-Truth Semantic Sentences)",
+        "以下是由本地微觀語音模型對本片轉錄、並依據自然換氣停頓與標點合併為完整語意的「句子清單」。",
+        "每個 Sentence 均為一個完整的表達單元，包含精確起訖秒數（start -> end）。",
+        "請在輸出 final_edl 時，直接引用選定片段對應的 `start_sentence_id` 與 `end_sentence_id`（亦相容 `start_segment_id`/`end_segment_id`），",
+        "並將 `source_in` 與 `source_out` 對齊該句子之起訖時間（嚴禁自行粗估時間碼）：\n"
     ]
-    for s in whisper_segs:
-        lines.append(f"[ID: {s['id']:3d}] {s['start']:6.2f}s -> {s['end']:6.2f}s | {s['text']}")
+    for s in whisper_sentences:
+        lines.append(f"[Sentence ID: {s['id']:3d}] {s['start']:6.2f}s -> {s['end']:6.2f}s | {s['text']}")
     return "\n".join(lines)
 
 
@@ -229,29 +316,39 @@ def normalize_text(text):
     return re.sub(r'[^\w\u4e00-\u9fff]', '', text).lower()
 
 
-def align_clip_with_whisper(whisper_segs, clip_data, total_dur):
+def align_clip_with_whisper(whisper_units, clip_data, total_dur):
     """
     比照字幕方式：嚴格以 Whisper 物理時間為準，不猜測、不更動字尾！
-    優先採用 start_segment_id / end_segment_id，次之採用文本子字串比對，再次之採用時間窗。
+    優先採用 start_sentence_id / end_sentence_id 或 start_segment_id / end_segment_id，
+    次之採用文本子字串比對，再次之採用時間窗。
     """
-    if not whisper_segs:
+    if not whisper_units:
         return clip_data.get("source_in", 0), clip_data.get("source_out", total_dur)
 
-    start_id = clip_data.get("start_segment_id")
-    end_id = clip_data.get("end_segment_id")
+    start_id = clip_data.get("start_sentence_id")
+    if start_id is None:
+        start_id = clip_data.get("start_segment_id")
+
+    end_id = clip_data.get("end_sentence_id")
+    if end_id is None:
+        end_id = clip_data.get("end_segment_id")
 
     # 1. 優先使用 ID
     if start_id is not None and end_id is not None:
-        matched = [s for s in whisper_segs if start_id <= s["id"] <= end_id]
+        matched = [s for s in whisper_units if start_id <= s["id"] <= end_id]
         if matched:
-            return matched[0]["start"], matched[-1]["end"]
+            first_words = matched[0].get("words", [])
+            last_words = matched[-1].get("words", [])
+            t_first = first_words[0]["start"] if first_words else matched[0]["start"]
+            t_last = last_words[-1]["end"] if last_words else matched[-1]["end"]
+            return t_first, t_last
 
     raw_in = clip_data.get("source_in", 0)
     raw_out = clip_data.get("source_out", total_dur)
     transcript = clip_data.get("transcript", "")
 
     # 2. 透過時間窗附近篩選
-    cand_segs = [s for s in whisper_segs if not (s["end"] < raw_in - 2.5 or s["start"] > raw_out + 2.5)]
+    cand_segs = [s for s in whisper_units if not (s["end"] < raw_in - 2.5 or s["start"] > raw_out + 2.5)]
     if not cand_segs:
         return raw_in, raw_out
 
@@ -547,6 +644,8 @@ def main():
     parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 畫質參數 (預設 18)")
     parser.add_argument("--pacing", "-p", choices=["auto", "dynamic", "compact", "breathing"], default="auto",
                         help="剪輯節奏風格: 'auto'/'dynamic' (文字剪輯微氣息鎖定, 推薦預設)")
+    parser.add_argument("--agentic", action="store_true", help="啟用 Gemini Agentic Video Understanding 動態探索模式")
+    parser.add_argument("--suffix", default=None, help="自訂輸出檔案名稱標籤後綴 (預設為 agentic 或 static)")
     parser.add_argument("--script", "-s", default=None, help="可選的分鏡講稿或文本檔案路徑 (TXT/MD)")
     parser.add_argument("--cached-json", default=None,
                         help="指定既有之初剪決策 JSON 檔案路徑，跳過 Gemini 上傳與雲端分析")
@@ -562,18 +661,25 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     base_name = video_path.stem
 
+    # 決定輸出檔案標籤
+    tag = args.suffix if args.suffix else ("agentic" if args.agentic else "static")
+
     print(f"==> 1. 檢測影片資訊: {video_path.name}")
     total_dur, width, height, fps = probe_video(video_path)
     print(f"    時長: {total_dur:.1f} 秒 (~{total_dur/60:.1f} 分鐘) | 解析度: {width}x{height} | 幀率: {fps:.3f} fps")
 
-    # 第一階段：Whisper 微觀聲學時間戳對齊 (Word-level Ground Truth)
+    # 第一階段：Whisper 微觀聲學時間戳對齊 (Word-level Ground Truth) 與語意句子合併
     whisper_segs = []
+    whisper_sentences = []
     if not args.skip_whisper:
         whisper_json = out_dir / f"{base_name}_whisper_raw.json"
-        print(f"==> 2. 執行 Whisper 微觀字級聲學時間戳轉錄...")
-        whisper_segs = transcribe_video_whisper(video_path, whisper_json, model_name="small")
+        print(f"==> 2. 執行 Whisper 微觀字級聲學時間戳轉錄與語意句子合併...")
+        whisper_segs, whisper_sentences = transcribe_video_whisper(video_path, whisper_json, model_name="small")
+
+    whisper_units = whisper_sentences if whisper_sentences else whisper_segs
 
     # 第二階段：Gemini 宏觀多模態視訊理解與選鏡決策
+    inference_metrics = {}
     if args.cached_json:
         cached_file = Path(args.cached_json).resolve()
         if not cached_file.exists():
@@ -601,51 +707,158 @@ def main():
             if script_path.exists():
                 prompt += f"\n\n---\n## 參考講稿 (Production Script)\n{script_path.read_text(encoding='utf-8')}\n"
 
-        # 附上 Whisper 轉錄劇本
-        if whisper_segs:
-            prompt += format_whisper_transcript_for_prompt(whisper_segs)
+        # 附上 Whisper 語意劇本
+        if whisper_units:
+            prompt += format_whisper_transcript_for_prompt(whisper_units)
 
-        print(f"==> 3. 上傳影片至 Gemini Files API ({video_path.stat().st_size / (1024*1024):.1f} MB)...")
-        t0 = time.time()
-        video_file = client.files.upload(file=str(video_path))
-        print(f"    上傳完畢 (耗時 {time.time() - t0:.1f} 秒)。等待雲端轉碼 ACTIVE...")
+        # 影片上傳或快取重用
+        upload_cache_path = out_dir / f".{video_path.name}_upload_cache.json"
+        video_file = None
+        if upload_cache_path.exists():
+            try:
+                cached_info = json.loads(upload_cache_path.read_text(encoding="utf-8"))
+                cached_name = cached_info.get("name")
+                check_file = client.files.get(name=cached_name)
+                if check_file.state.name == "ACTIVE":
+                    video_file = check_file
+                    print(f"    ✓ 重用快取之雲端視訊 (File ID: {video_file.name})")
+            except Exception:
+                pass
 
-        while video_file.state.name == "PROCESSING":
-            time.sleep(3)
-            video_file = client.files.get(name=video_file.name)
+        if video_file is None:
+            print(f"==> 3. 上傳影片至 Gemini Files API ({video_path.stat().st_size / (1024*1024):.1f} MB)...")
+            t0 = time.time()
+            video_file = client.files.upload(file=str(video_path))
+            print(f"    上傳完畢 (耗時 {time.time() - t0:.1f} 秒)。等待雲端轉碼 ACTIVE...")
 
-        if video_file.state.name != "ACTIVE":
-            print(f"Gemini 處理失敗: {video_file.state.name}")
-            sys.exit(1)
+            while video_file.state.name == "PROCESSING":
+                time.sleep(3)
+                video_file = client.files.get(name=video_file.name)
 
-        print(f"==> 4. 調用 {args.model} 結合 Whisper 劇本進行文字剪輯與選鏡決策...")
+            if video_file.state.name != "ACTIVE":
+                print(f"Gemini 處理失敗: {video_file.state.name}")
+                sys.exit(1)
+
+            try:
+                upload_cache_path.write_text(json.dumps({
+                    "name": video_file.name,
+                    "uri": video_file.uri,
+                    "timestamp": time.time()
+                }), encoding="utf-8")
+            except Exception:
+                pass
+
+        mime_type = video_file.mime_type or "video/mp4"
+        mode_str = "🤖 Agentic Video Understanding (Interactions API)" if args.agentic else "📺 Static Multimodal (靜態抽幀)"
+        print(f"==> 4. 調用 {args.model} [模式: {mode_str}] 結合 Whisper 劇本進行文字剪輯與選鏡決策...")
+
         t1 = time.time()
-        response = client.models.generate_content(
-            model=args.model,
-            contents=[video_file, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.0,
-                max_output_tokens=8192
+        raw_json = ""
+        prompt_tokens = 0
+        candidates_tokens = 0
+        thoughts_tokens = 0
+        total_tokens = 0
+        tool_tokens = 0
+
+        if args.agentic:
+            try:
+                interaction = client.interactions.create(
+                    model=args.model,
+                    input=[
+                        {"type": "video", "uri": video_file.uri, "processing": "agentic"},
+                        {"type": "text", "text": prompt}
+                    ]
+                )
+                raw_json = interaction.output_text or ""
+                usage = getattr(interaction, "usage", None)
+                if usage:
+                    prompt_tokens = getattr(usage, "total_input_tokens", 0) or 0
+                    candidates_tokens = getattr(usage, "total_output_tokens", 0) or 0
+                    thoughts_tokens = getattr(usage, "total_thought_tokens", 0) or 0
+                    total_tokens = getattr(usage, "total_tokens", 0) or 0
+                    tool_tokens = getattr(usage, "total_tool_use_tokens", 0) or 0
+            except Exception as e:
+                print(f"    Interactions API 遭遇異常 ({e})，降級調用 models.generate_content...")
+                video_part = types.Part(
+                    file_data=types.FileData(file_uri=video_file.uri, mime_type=mime_type),
+                    media_processing=types.MediaProcessing.AGENTIC
+                )
+                response = client.models.generate_content(
+                    model=args.model,
+                    contents=[video_part, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.0,
+                        max_output_tokens=8192
+                    )
+                )
+                if hasattr(response, "text") and response.text:
+                    raw_json = response.text
+                elif hasattr(response, "candidates") and response.candidates:
+                    parts = getattr(response.candidates[0].content, "parts", [])
+                    raw_json = "\n".join([p.text for p in parts if hasattr(p, "text") and p.text])
+                usage = getattr(response, "usage_metadata", None)
+                if usage:
+                    prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                    candidates_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                    total_tokens = getattr(usage, "total_token_count", 0) or 0
+                    thoughts_tokens = getattr(usage, "thoughts_token_count", 0) or 0
+        else:
+            video_part = types.Part(
+                file_data=types.FileData(file_uri=video_file.uri, mime_type=mime_type)
             )
-        )
-        print(f"    模型分析完成 (耗時 {time.time() - t1:.1f} 秒)！")
+            response = client.models.generate_content(
+                model=args.model,
+                contents=[video_part, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                    max_output_tokens=8192
+                )
+            )
+            if hasattr(response, "text") and response.text:
+                raw_json = response.text
+            elif hasattr(response, "candidates") and response.candidates:
+                parts = getattr(response.candidates[0].content, "parts", [])
+                raw_json = "\n".join([p.text for p in parts if hasattr(p, "text") and p.text])
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                candidates_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                total_tokens = getattr(usage, "total_token_count", 0) or 0
+                thoughts_tokens = getattr(usage, "thoughts_token_count", 0) or 0
+
+        duration = time.time() - t1
+        print(f"    模型推論完成 (耗時 {duration:.1f} 秒)！")
+        print(f"    📊 Token 統計: 輸入={prompt_tokens:,} | 輸出={candidates_tokens:,} | 思維={thoughts_tokens:,} | 工具探索={tool_tokens:,} | 總計={total_tokens:,}")
+
+        inference_metrics = {
+            "mode": "agentic" if args.agentic else "static",
+            "duration_seconds": round(duration, 2),
+            "prompt_tokens": prompt_tokens,
+            "candidates_tokens": candidates_tokens,
+            "thoughts_tokens": thoughts_tokens,
+            "tool_use_tokens": tool_tokens,
+            "total_tokens": total_tokens
+        }
+
+        raw_json = raw_json.strip()
+        if "```json" in raw_json:
+            raw_json = raw_json.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw_json:
+            raw_json = raw_json.split("```")[1].split("```")[0].strip()
+        elif not raw_json.startswith("{") and "{" in raw_json:
+            start_idx = raw_json.find("{")
+            end_idx = raw_json.rfind("}")
+            if start_idx != -1 and end_idx != -1:
+                raw_json = raw_json[start_idx:end_idx+1].strip()
 
         try:
-            client.files.delete(name=video_file.name)
-        except Exception:
-            pass
-
-        raw_json = response.text.strip()
-        if raw_json.startswith("```json"):
-            raw_json = raw_json[7:]
-        if raw_json.startswith("```"):
-            raw_json = raw_json[3:]
-        if raw_json.endswith("```"):
-            raw_json = raw_json[:-3]
-        raw_json = raw_json.strip()
-
-        model_edl = json.loads(raw_json)
+            model_edl = json.loads(raw_json)
+        except Exception as e:
+            print(f"解析 Gemini JSON 失敗: {e}")
+            print(f"原始回傳內容:\n{raw_json}")
+            sys.exit(1)
 
     # 第三階段：比照字幕邏輯——時間鎖定與拍手防護
     print(f"==> 5. 執行文字剪輯時間鎖定 (Text-Based Locked Timestamps) 與拍手防護...")
@@ -655,7 +868,7 @@ def main():
 
     refined_edl = []
     for c in model_edl.get("final_edl", []):
-        t_first, t_last = align_clip_with_whisper(whisper_segs, c, total_dur)
+        t_first, t_last = align_clip_with_whisper(whisper_units, c, total_dur)
         transcript = c.get("transcript", "") or c.get("content", "")
 
         tight_in, tight_out, clip_cps, in_m, out_m = refine_speech_bounds_locked(
@@ -675,6 +888,7 @@ def main():
             "in_margin": in_m,
             "out_margin": out_m,
             "transcript": transcript,
+            "take_selection_reason": c.get("take_selection_reason", ""),
             "visual_check": c.get("visual_check", "眼神直視鏡頭就緒，無眨眼閉眼"),
             "audio_check": c.get("audio_check", f"Whisper精準錨定 (In前置氣息={in_m:.2f}s, Out俐落收口={out_m:.2f}s)")
         })
@@ -686,17 +900,18 @@ def main():
     print(f"    初剪片段數: {len(refined_edl)} | 成片預計長度: {total_out_dur:.1f} 秒 (~{total_out_dur/60:.2f} 分鐘) | 全片平均語速: {avg_cps:.2f} 字/秒")
 
     # 輸出資料
-    json_path = out_dir / f"{base_name}_text_based_edl.json"
+    json_path = out_dir / f"{base_name}_{tag}_edl.json"
     json_path.write_text(json.dumps({
-        "project_title": f"{base_name} AI 文字剪輯初剪",
+        "project_title": f"{base_name} AI 文字剪輯初剪 ({tag})",
         "pacing_style": "text_based_whisper_grounded",
+        "inference_metrics": inference_metrics,
         "average_cps": avg_cps,
         "total_duration": total_out_dur,
         "final_edl": refined_edl
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"==> 6. 輸出結構化資料: {json_path.name}")
 
-    csv_path = out_dir / f"{base_name}_text_based_edl.csv"
+    csv_path = out_dir / f"{base_name}_{tag}_edl.csv"
     with open(csv_path, "w", encoding="utf-8-sig") as f:
         f.write("Clip_ID,Topic,Source_In,Source_Out,Duration,CPS,In_Margin,Out_Margin,Transcript,Visual_Check,Audio_Check\n")
         for c in refined_edl:
@@ -706,15 +921,15 @@ def main():
             f.write(f'{c["clip_id"]},"{c["topic"]}",{c["source_in"]:.2f},{c["source_out"]:.2f},{c["duration"]:.2f},{c["cps"]:.2f},{c["in_margin"]:.2f},{c["out_margin"]:.2f},"{tr}","{vc}","{ac}"\n')
     print(f"==> 7. 輸出表格清單: {csv_path.name}")
 
-    xml_path = out_dir / f"{base_name}_text_based_edl.xml"
+    xml_path = out_dir / f"{base_name}_{tag}_edl.xml"
     generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps)
     print(f"==> 8. 輸出通用剪輯工程檔: {xml_path.name}")
 
-    fcpxml_path = out_dir / f"{base_name}_text_based_edl.fcpxml"
+    fcpxml_path = out_dir / f"{base_name}_{tag}_edl.fcpxml"
     generate_fcpxml(refined_edl, video_path, total_dur, total_out_dur, fcpxml_path, fps)
     print(f"==> 9. 輸出 Final Cut Pro X 工程檔: {fcpxml_path.name}")
 
-    out_mp4 = out_dir / f"{base_name}_text_based_rough_cut.mp4"
+    out_mp4 = out_dir / f"{base_name}_{tag}_rough_cut.mp4"
     print(f"==> 10. FFmpeg 渲染成片: {out_mp4.name} ...")
     render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
     print(f"==> [完成] 最終成片已產出！檔案大小: {out_mp4.stat().st_size / (1024*1024):.1f} MB")
