@@ -34,12 +34,20 @@
 
 ## 📂 Project Structure
 
+This project complies with the [Agent Skills Specification](https://agentskills.io/specification):
+
 ```text
 video-trimmer/
-├── pyproject.toml            # Modern Python package configuration
+├── SKILL.md                  # Standard Agent Skill specification & agent manual
+├── README.md                 # Public GitHub documentation
+├── LICENSE                   # MIT License
+├── pyproject.toml            # Modern PEP 621 Python packaging & console scripts
 ├── requirements.txt          # Python dependencies
-├── video_trimmer.py          # Primary CLI trimmer program
+├── video_trimmer.py          # Primary CLI entrypoint forwarder
 ├── auto_rough_cut.py         # Backward compatibility wrapper
+├── scripts/                  # Core engine modules
+│   ├── __init__.py
+│   └── video_trimmer.py      # Master trimmer engine & acoustic analyzer
 ├── prompts/
 │   └── video_cut_prompt.md   # Core multimodal prompting specification
 └── examples/                 # Sample project outputs (EDL, XML, FCPXML, JSON)

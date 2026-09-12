@@ -52,6 +52,11 @@ all = [
 Homepage = "https://github.com/sylphlin/video-trimmer"
 Repository = "https://github.com/sylphlin/video-trimmer.git"
 
+[tool.setuptools]
+py-modules = ["video_trimmer", "auto_rough_cut"]
+packages = ["scripts"]
+
 [project.scripts]
 video-trimmer = "video_trimmer:main"
 auto-rough-cut = "video_trimmer:main"
+
