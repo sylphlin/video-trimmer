@@ -47,7 +47,15 @@ video-trimmer/
 ├── auto_rough_cut.py         # Backward compatibility wrapper
 ├── scripts/                  # Core engine modules
 │   ├── __init__.py
-│   └── video_trimmer.py      # Master trimmer engine & acoustic analyzer
+│   ├── video_trimmer.py      # CLI (argparse) + pipeline orchestration (main())
+│   ├── constants.py          # Centrally managed named constants
+│   ├── exceptions.py         # Custom exception hierarchy
+│   ├── acoustic.py           # CPS, dynamic margins, text-locked acoustic bounds
+│   ├── transcribe.py         # Whisper transcription, sentence merge, clip alignment
+│   ├── gemini_client.py      # Gemini API key/prompt/upload/inference (with retry)
+│   ├── exporters.py          # FCP7 XML / FCPXML / CSV generation
+│   └── render.py             # ffprobe inspection & ffmpeg final render
+├── tests/                    # Offline unit tests (synthetic audio & fixtures, pytest)
 ├── prompts/
 │   └── video_cut_prompt.md   # Core multimodal prompting specification
 └── examples/                 # Sample project outputs (EDL, XML, FCPXML, JSON)
@@ -143,6 +151,7 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 | `--suffix` | | `None` | Custom tag suffix for generated filenames. |
 | `--crf` | | `18` | FFmpeg H.264 rendering CRF parameter (18 = visually lossless). |
 | `--skip-whisper`| | `False` | Skip local Whisper transcription (use pure energy fallback). |
+| `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
 
 ---
 
@@ -150,12 +159,13 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 
 For an input file `take 1.mp4`, `video-trimmer` produces:
 
-1. **`take 1_<tag>_trimmed.mp4`**: Fully assembled cut video with 15ms audio micro-fades.
+1. **`take 1_<tag>_trimmed.mp4`**: Fully assembled cut video with equal-power audio micro-fades.
 2. **`take 1_<tag>_edl.xml`**: Standard FCP 7 XML for **Adobe Premiere Pro** and **DaVinci Resolve**.
 3. **`take 1_<tag>_edl.fcpxml`**: Apple FCPXML for **Final Cut Pro X**.
 4. **`take 1_<tag>_edl.json`**: Structured decisions including selected sentences, CPS, and timing.
 5. **`take 1_<tag>_edl.csv`**: Spreadsheet-ready table with visual/audio validation notes.
 6. **`take 1_whisper_sentences.json`**: Full semantic transcript with word-level boundaries.
+7. **`usage_log.jsonl`** (in `--output-dir`): One appended JSON line per Gemini API call, recording token usage and call duration for manual cost tracking.
 
 ---
 
@@ -170,6 +180,17 @@ For an input file `take 1.mp4`, `video-trimmer` produces:
 - **Final Cut Pro X**:
   1. `File` -> `Import` -> `XML...`.
   2. Select `_edl.fcpxml`.
+
+---
+
+## 🧪 Development & Testing
+
+Offline unit tests (synthetic audio, handwritten fixtures — no real video/API calls needed):
+
+```bash
+pip install -e ".[dev]"
+pytest tests/
+```
 
 ---
 
