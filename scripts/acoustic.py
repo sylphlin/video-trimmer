@@ -31,33 +31,6 @@ def calculate_clip_cps(transcript, duration):
     return round(syllables / dur, 2), syllables
 
 
-def compute_dynamic_margins(cps, pacing="auto"):
-    """
-    依據語速 CPS (字/秒) 動態計算自然呼吸與收口留白：
-    - 快語速 (CPS >= 5.5，如泛科學 6.0~8.0 字/秒)：
-      In 留白 0.06s 微氣息，Out 留白 0.12s 俐落定格（緊湊有勁，無冷場拖沓）
-    - 慢語速 (CPS <= 3.0，如工頭堅 2.5~3.0 字/秒)：
-      In 留白 0.15s 定神氣息，Out 留白 0.28s 表情餘韻（沉穩舒緩）
-    - 中間語速：連續線性插值
-    """
-    if pacing == "compact":
-        return 0.06, 0.10
-    elif pacing == "breathing":
-        return 0.25, 0.35
-
-    if cps >= 5.5:
-        in_m = 0.06
-        out_m = 0.12
-    elif cps <= 3.0:
-        in_m = 0.15
-        out_m = 0.28
-    else:
-        alpha = (cps - 3.0) / (5.5 - 3.0)
-        in_m = 0.15 - alpha * (0.15 - 0.06)
-        out_m = 0.28 - alpha * (0.28 - 0.12)
-    return round(in_m, 2), round(out_m, 2)
-
-
 def refine_speech_bounds_locked(
     audio,
     sr,

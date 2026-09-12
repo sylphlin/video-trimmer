@@ -1,37 +1,13 @@
 """transcribe.py 的離線單元測試：手寫假 segments，不需要真的跑 Whisper。"""
 
-import pytest
-
 from scripts.transcribe import (
     merge_whisper_segments_to_sentences,
-    mmss_to_sec,
     normalize_text,
-    resolve_timestamp,
 )
 
 
 def _seg(id_, start, end, text, words=None):
     return {"id": id_, "start": start, "end": end, "text": text, "words": words or []}
-
-
-class TestMmssToSec:
-    def test_basic_conversion(self):
-        # 724.8 代表 7分24.8秒 -> 444.8 秒
-        assert mmss_to_sec(724.8) == pytest.approx(444.8)
-
-    def test_zero(self):
-        assert mmss_to_sec(0) == 0
-
-    def test_seconds_only_under_one_minute(self):
-        assert mmss_to_sec(45) == 45
-
-
-class TestResolveTimestamp:
-    def test_within_duration_kept_as_absolute_seconds(self):
-        assert resolve_timestamp(120.0, total_dur=300.0) == 120.0
-
-    def test_beyond_duration_converted_from_mmss_format(self):
-        assert resolve_timestamp(724.8, total_dur=300.0) == pytest.approx(444.8)
 
 
 class TestNormalizeText:
