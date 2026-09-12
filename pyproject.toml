@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-trimmer"
+version = "0.1.0"
+description = "AI-Powered Smart Video Trimmer with Multimodal Understanding, Acoustic Onset Snapping & Text-Based Editing"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "sylphlin", email = "sylph.lin@gmail.com" }
+]
+keywords = [
+    "video-trimmer",
+    "video-editing",
+    "ai-video-editing",
+    "rough-cut",
+    "gemini",
+    "whisper",
+    "mlx-whisper",
+    "ffmpeg",
+    "text-based-editing"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Multimedia :: Video",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "google-genai>=0.1.1",
+    "soundfile>=0.12.1",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0"
+]
+
+[project.optional-dependencies]
+mlx = [
+    "mlx-whisper>=0.4.0; sys_platform == 'darwin'"
+]
+whisper = [
+    "faster-whisper>=1.0.0"
+]
+all = [
+    "faster-whisper>=1.0.0",
+    "mlx-whisper>=0.4.0; sys_platform == 'darwin'"
+]
+
+[project.urls]
+Homepage = "https://github.com/sylphlin/video-trimmer"
+Repository = "https://github.com/sylphlin/video-trimmer.git"
+
+[project.scripts]
+video-trimmer = "video_trimmer:main"
+auto-rough-cut = "video_trimmer:main"

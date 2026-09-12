@@ -25,3 +25,8 @@ Thumbs.db
 
 # Temporary files
 temp_*
+.*_upload_cache.json
+*.upload_cache.json
+build/
+dist/
+*.egg-info/
