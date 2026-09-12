@@ -27,6 +27,8 @@ Thumbs.db
 temp_*
 .*_upload_cache.json
 *.upload_cache.json
+usage_log.jsonl
 build/
 dist/
 *.egg-info/
+.pytest_cache/
