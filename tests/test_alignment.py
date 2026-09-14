@@ -1,7 +1,10 @@
-"""align_clip_with_whisper 的離線單元測試：假造 whisper_units + clip_data，
-涵蓋 id 比對與純文字比對兩種情境，並驗證回傳的相鄰句子邊界 (prev/next) 正確性。"""
+import unittest
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    import tests
+    import pytest
 
 from scripts.transcribe import align_clip_with_whisper
 
@@ -28,7 +31,7 @@ def _build_units():
     ]
 
 
-class TestAlignClipWithWhisper:
+class TestAlignClipWithWhisper(unittest.TestCase):
     def test_empty_whisper_units_returns_clip_bounds_and_no_neighbors(self):
         clip = {"source_in": 5.0, "source_out": 8.0}
         t_first, t_last, prev_end, next_start = align_clip_with_whisper([], clip, total_dur=10.0)
@@ -78,3 +81,17 @@ class TestAlignClipWithWhisper:
         clip = {"source_in": 100.0, "source_out": 105.0, "transcript": "無關內容"}
         t_first, t_last, prev_end, next_start = align_clip_with_whisper(units, clip, total_dur=200.0)
         assert (t_first, t_last, prev_end, next_start) == (100.0, 105.0, None, None)
+
+    def test_target_speaker_in_point_lock_skips_non_target_words(self):
+        """若首個句子的前置單詞為場外非目標人員 (is_target_speaker=False)，t_first 跳至首個主講人單詞"""
+        words = [
+            {"word": "Action", "start": 1.0, "end": 1.5, "is_target_speaker": False},
+            {"word": "嗨", "start": 2.0, "end": 2.3, "is_target_speaker": True},
+            {"word": "大家好", "start": 2.3, "end": 3.0, "is_target_speaker": True},
+        ]
+        sentence = _sentence(1, 1.0, 3.0, "Action 嗨 大家好", words)
+        clip = {"start_sentence_id": 1, "end_sentence_id": 1, "transcript": "嗨 大家好"}
+        t_first, t_last, _, _ = align_clip_with_whisper([sentence], clip, total_dur=10.0)
+        assert t_first == pytest.approx(2.0, abs=0.05)
+        assert t_last == pytest.approx(3.0, abs=0.05)
+

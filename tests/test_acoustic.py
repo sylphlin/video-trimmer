@@ -1,7 +1,11 @@
 """acoustic.py 的離線單元測試：以合成音訊驗證方向性與邊界正確性，不追求絕對數值精準。"""
 
 import numpy as np
-import pytest
+try:
+    import pytest
+except ImportError:
+    import tests
+    import pytest
 
 from scripts.acoustic import calculate_clip_cps, compute_dynamic_margins, refine_speech_bounds_locked
 

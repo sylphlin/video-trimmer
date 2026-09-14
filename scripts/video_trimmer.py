@@ -32,11 +32,19 @@ except ImportError as e:
     logging.error("請先執行: pip install -r requirements.txt")
     sys.exit(1)
 
+import os
 from .acoustic import refine_speech_bounds_locked
 from .constants import ALLOWED_INPUT_EXTENSIONS
 from .exceptions import InvalidInputError, VideoTrimmerError
 from .exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
-from .gemini_client import build_prompt, load_gemini_api_key, run_gemini_inference, upload_or_reuse_video
+from .gcs_utils import delete_gcs_blob
+from .gemini_client import (
+    build_prompt,
+    get_gemini_client,
+    load_env_file,
+    run_gemini_inference,
+    stage_video_to_gcs,
+)
 from .render import probe_video, render_cut_video
 from .transcribe import align_clip_with_whisper, transcribe_video_whisper
 
@@ -91,13 +99,18 @@ def _run(args):
     logger.info("    時長: %.1f 秒 (~%.1f 分鐘) | 解析度: %dx%d | 幀率: %.3f fps",
                 total_dur, total_dur / 60, width, height, fps)
 
-    # 第一階段：Whisper 微觀聲學時間戳對齊 (Word-level Ground Truth) 與語意句子合併
+    # 第一階段：Whisper 微觀聲學時間戳轉錄 (Word-level Ground Truth) 與語意句子合併
     whisper_segs = []
     whisper_sentences = []
+
     if not args.skip_whisper:
         whisper_json = out_dir / f"{base_name}_whisper_raw.json"
         logger.info("==> 2. 執行 Whisper 微觀字級聲學時間戳轉錄與語意句子合併...")
-        whisper_segs, whisper_sentences = transcribe_video_whisper(video_path, whisper_json, model_name="small")
+        whisper_segs, whisper_sentences = transcribe_video_whisper(
+            video_path,
+            whisper_json,
+            model_name="small",
+        )
 
     whisper_units = whisper_sentences if whisper_sentences else whisper_segs
 
@@ -111,8 +124,8 @@ def _run(args):
         with open(cached_file, "r", encoding="utf-8") as f:
             model_edl = json.load(f)
     else:
-        load_gemini_api_key()
-        client = genai.Client()
+        load_env_file()
+        client = get_gemini_client(project_id=args.project, location=args.region)
 
         prompt_candidates = [
             Path(__file__).parent / "prompts" / "video_cut_prompt.md",
@@ -124,15 +137,27 @@ def _run(args):
         script_path = Path(args.script).resolve() if args.script else None
         prompt = build_prompt(prompt_candidates, script_path=script_path, whisper_units=whisper_units)
 
-        # 影片上傳或快取重用
-        upload_cache_path = out_dir / f".{video_path.name}_upload_cache.json"
-        logger.info("==> 3. 準備影片予 Gemini Files API...")
-        video_file = upload_or_reuse_video(client, video_path, upload_cache_path)
+        resolved_bucket = (
+            args.bucket
+            or os.environ.get("VIDEO_TRIMMER_BUCKET")
+            or os.environ.get("VIDEO_STORAGE_BUCKET")
+            or os.environ.get("MEETING_STORAGE_BUCKET")
+            or os.environ.get("GCS_BUCKET")
+            or ""
+        ).removeprefix("gs://") or None
 
-        mode_str = "🤖 Agentic Video Understanding (Interactions API)" if args.agentic else "📺 Static Multimodal (靜態抽幀)"
+        logger.info("==> 3. 準備視訊至 Cloud Storage 暫存...")
+        gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(video_path, resolved_bucket)
+
+        mode_str = "🤖 Agentic Video Understanding (動態影格探索模式)" if args.agentic else "📺 Static Multimodal (靜態抽幀)"
         logger.info("==> 4. 調用 %s [模式: %s] 結合 Whisper 劇本進行文字剪輯與選鏡決策...", args.model, mode_str)
 
-        raw_json, usage, duration = run_gemini_inference(client, types, args.model, video_file, prompt, args.agentic)
+        try:
+            raw_json, usage, duration = run_gemini_inference(client, types, args.model, gcs_uri, mime_type, prompt, args.agentic)
+        finally:
+            if is_ephemeral and not args.keep_gcs_upload:
+                delete_gcs_blob(gcs_uri)
+
         logger.info("    模型推論完成 (耗時 %.1f 秒)！", duration)
         logger.info("    📊 Token 統計: 輸入=%s | 輸出=%s | 思維=%s | 工具探索=%s | 總計=%s",
                     f"{usage['prompt_tokens']:,}", f"{usage['candidates_tokens']:,}",
@@ -240,10 +265,17 @@ def _run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="video-trimmer: AI-Powered Smart Video Trimmer (Whisper Ground-Truth + Gemini Multimodal)")
+    load_env_file()
+    default_model = os.environ.get("MODEL_NAME") or os.environ.get("TRIMMER_MODEL") or "gemini-3.8-flash"
+
+    parser = argparse.ArgumentParser(description="video-trimmer: AI-Powered Smart Video Trimmer (Whisper Ground-Truth + Vertex AI Gemini)")
     parser.add_argument("--input", "-i", required=True, help="輸入影片檔案路徑 (MP4/MOV)")
     parser.add_argument("--output-dir", "-o", default=None, help="輸出資料夾 (預設為影片所在目錄)")
-    parser.add_argument("--model", "-m", default="gemini-3.8-flash", help="使用的 Gemini 模型名稱")
+    parser.add_argument("--model", "-m", default=default_model, help=f"使用的 Gemini 模型名稱 (預設: {default_model})")
+    parser.add_argument("--project", default=None, help="Google Cloud 專案 ID (預設讀取 GOOGLE_CLOUD_PROJECT/GCP_PROJECT 或 ADC)")
+    parser.add_argument("--region", default=None, help="Vertex AI 區域/位置 (預設讀取 GOOGLE_CLOUD_LOCATION/GCP_REGION 或 'global')")
+    parser.add_argument("--bucket", default=None, help="用於暫存視訊的 GCS Bucket (預設讀取 VIDEO_TRIMMER_BUCKET)")
+    parser.add_argument("--keep-gcs-upload", action="store_true", help="保留上傳至 GCS 的暫存視訊，不於推論後自動清理")
     parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 畫質參數 (預設 18)")
     parser.add_argument("--pacing", "-p", choices=["auto", "dynamic", "compact", "breathing"], default="auto",
                         help="剪輯節奏風格: 'auto'/'dynamic' (文字剪輯微氣息鎖定, 推薦預設)")

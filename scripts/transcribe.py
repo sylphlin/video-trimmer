@@ -48,10 +48,25 @@ def normalize_text(text):
     return re.sub(r'[^\w一-鿿]', '', text).lower()
 
 
+def _compute_sentence_speaker(sentence):
+    """計算句子內多數說話者與合法主講人狀態"""
+    words = sentence.get('words', [])
+    if words:
+        target_cnt = sum(1 for w in words if w.get('is_target_speaker', True))
+        sentence['is_target_speaker'] = (target_cnt >= len(words) / 2.0)
+        spk_counts = {}
+        for w in words:
+            spk = w.get('speaker_id')
+            if spk:
+                spk_counts[spk] = spk_counts.get(spk, 0) + 1
+        if spk_counts:
+            sentence['speaker_id'] = max(spk_counts.items(), key=lambda x: x[1])[0]
+
+
 def merge_whisper_segments_to_sentences(segments, max_gap=0.55, max_sentence_dur=20.0):
     """
-    將 Whisper 零碎的聲學 Segments 依據自然換氣停頓與語法標點合併為完整語意句子。
-    完整保留底層每個單詞的字級時間戳 (word_timestamps)，
+    將 Whisper 零碎的聲學 Segments 依據自然換氣停頓、聲紋主講人狀態與語法標點合併為完整語意句子。
+    完整保留底層每個單詞的字級時間戳 (word_timestamps) 與聲紋鎖定狀態，
     讓大模型在更高層級的完整語意單元 (Sentence/Take) 上進行挑選，杜絕漏選半截話或語意腰斬。
     """
     if not segments:
@@ -68,6 +83,8 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.55, max_sentence_dur
         s_start = s['start']
         s_end = s['end']
         s_words = s.get('words', [])
+        s_is_target = s.get('is_target_speaker', True)
+        s_spk = s.get('speaker_id', 'SPEAKER_00')
 
         if curr is None:
             curr = {
@@ -76,8 +93,11 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.55, max_sentence_dur
                 'end': s_end,
                 'text': s_text,
                 'words': list(s_words),
-                'orig_segment_ids': [s['id']]
+                'orig_segment_ids': [s['id']],
+                'speaker_id': s_spk,
+                'is_target_speaker': s_is_target
             }
+            _compute_sentence_speaker(curr)
             continue
 
         gap = s_start - curr['end']
@@ -104,12 +124,27 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.55, max_sentence_dur
         elif is_curr_japanese != is_s_japanese:
             should_split = True
 
-        # 連詞防斷保護 (若下個片段開頭是連詞，且未發生極長停頓，強制黏合)
+        # 5. 聲紋目標有效性跨越防黏合 (場外人員雜音與正片主講人強制斷開)
+        if curr.get('is_target_speaker', True) != s_is_target:
+            should_split = True
+
+        # 6. 訪談說話者交替輪替 (Speaker Turn-taking: 主持人 vs 來賓強制分句)
+        curr_spk = curr.get('speaker_id')
+        if s_spk and curr_spk and curr_spk != s_spk:
+            should_split = True
+
+        # 7. 絕對長停頓物理斷句 (gap >= 1.0s: 防呆保護，主講人若有自我反省/重來，拆為獨立 Sentence)
+        if gap >= 1.0:
+            should_split = True
+
+        # 連詞防斷保護 (若下個片段開頭是連詞，且未發生極長停頓或說話者切換，強制黏合)
         if should_split and gap < 0.90:
-            if any(s_text.startswith(c) for c in CONJUNCTIONS):
-                should_split = False
+            if curr.get('is_target_speaker', True) == s_is_target and curr.get('speaker_id') == s_spk:
+                if any(s_text.startswith(c) for c in CONJUNCTIONS):
+                    should_split = False
 
         if should_split:
+            _compute_sentence_speaker(curr)
             sentences.append(curr)
             curr = {
                 'id': len(sentences) + 1,
@@ -117,21 +152,30 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.55, max_sentence_dur
                 'end': s_end,
                 'text': s_text,
                 'words': list(s_words),
-                'orig_segment_ids': [s['id']]
+                'orig_segment_ids': [s['id']],
+                'speaker_id': s_spk,
+                'is_target_speaker': s_is_target
             }
+            _compute_sentence_speaker(curr)
         else:
             curr['end'] = s_end
             curr['text'] = curr['text'] + ' ' + s_text if not curr['text'].endswith((' ', '，', '。')) else curr['text'] + s_text
             curr['words'].extend(s_words)
             curr['orig_segment_ids'].append(s['id'])
+            _compute_sentence_speaker(curr)
 
     if curr is not None:
+        _compute_sentence_speaker(curr)
         sentences.append(curr)
 
     return sentences
 
 
-def transcribe_video_whisper(video_path, out_json_path, model_name="small"):
+def transcribe_video_whisper(
+    video_path,
+    out_json_path,
+    model_name="small"
+):
     """
     第一階段：微觀聲學時間戳對齊 (Word-level Ground Truth)
     在調用大模型之前，先在本地以 Whisper 生成帶有毫秒級字級時間戳的結構化劇本。
@@ -194,6 +238,7 @@ def transcribe_video_whisper(video_path, out_json_path, model_name="small"):
                 })
 
         temp_wav.unlink(missing_ok=True)
+
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(raw_results, f, ensure_ascii=False, indent=2)
         logger.info("Whisper 轉錄完畢，共解析出 %d 個高精度時間戳片段。", len(raw_results))
@@ -220,8 +265,13 @@ def format_whisper_transcript_for_prompt(whisper_sentences):
     lines = [
         "\n---",
         "## Whisper 語意句子時間戳劇本 (Ground-Truth Semantic Sentences)",
-        "以下是由本地微觀語音模型對本片轉錄、並依據自然換氣停頓與標點合併為完整語意的「句子清單」。",
-        "每個 Sentence 均為一個完整的表達單元，包含精確起訖秒數（start -> end）。",
+        "以下是由本地微觀語音模型（Whisper）對本片轉錄、並依據自然換氣停頓與標點合併之完整語意「句子清單」。",
+        "每個 Sentence 均為一個候選表達單元，包含物理起訖秒數（start -> end）。",
+        "【多模態發言人日誌審查 (Multimodal Active Speaker Diarization)】：",
+        "請務必結合視訊畫面中主講人的嘴型、眼神方向與肢體動作：",
+        "1. 僅挑選由畫面中央「目標主講人面對鏡頭正式發表」（target_host）的有效句子；",
+        "2. 任何由場外小幫手/導播喊出的口令（如 Action、報幕代號 CDA82/CTA-S2、CDA84 等，主講人嘴巴閉著或在等待）屬於無效場外音，嚴禁選入 final_edl！",
+        "3. 錄影空檔中主講人偏離鏡頭與工作人員之閒聊、自我檢討（如「這段不理想」），屬於 blooper/chatter，亦嚴禁選入 final_edl！",
         "請在輸出 final_edl 時，直接引用選定片段對應的 `start_sentence_id` 與 `end_sentence_id`（亦相容 `start_segment_id`/`end_segment_id`），",
         "並將 `source_in` 與 `source_out` 對齊該句子之起訖時間（嚴禁自行粗估時間碼）：\n"
     ]
@@ -255,6 +305,7 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
     比照字幕方式：嚴格以 Whisper 物理時間為準，不猜測、不更動字尾！
     優先採用 start_sentence_id / end_sentence_id 或 start_segment_id / end_segment_id，
     次之採用文本子字串比對，再次之採用時間窗。
+    In 點鎖定：嚴格跳過所有 is_target_speaker == False 的非目標人聲，直擊主講人真聲開口。
 
     回傳: (t_first, t_last, prev_sentence_end, next_sentence_start)
     prev_sentence_end / next_sentence_start 為相鄰 Whisper 句子的邊界（無相鄰句子時為 None），
@@ -287,10 +338,11 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
                     w_norm = normalize_text(w["word"])
                     if not w_norm:
                         continue
+                    w_is_target = w.get("is_target_speaker", True)
                     w_dur = (w["end"] - w["start"]) / len(w_norm)
                     for idx, ch in enumerate(w_norm):
                         ch_start = w["start"] + idx * w_dur
-                        char_timeline.append((ch, round(ch_start, 3), round(ch_start + w_dur, 3)))
+                        char_timeline.append((ch, round(ch_start, 3), round(ch_start + w_dur, 3), w_is_target))
 
                 tgt_norm = normalize_text(transcript)
                 whisper_str = ''.join([item[0] for item in char_timeline])
@@ -298,15 +350,33 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
                     matcher = difflib.SequenceMatcher(None, tgt_norm, whisper_str)
                     blocks = [b for b in matcher.get_matching_blocks() if b.size > 0]
                     if blocks and sum(b.size for b in blocks) >= max(2, len(tgt_norm) * 0.4):
-                        first_b = blocks[0]
+                        # 聲紋鎖定：尋找匹配區間中第一個屬於合法主講人的字元
+                        t_first = None
+                        for b in blocks:
+                            for c_idx in range(b.b, b.b + b.size):
+                                if char_timeline[c_idx][3]:  # is_target_speaker == True
+                                    t_first = char_timeline[c_idx][1]
+                                    break
+                            if t_first is not None:
+                                break
+                        if t_first is None:
+                            t_first = char_timeline[blocks[0].b][1]
+
                         last_b = blocks[-1]
-                        t_first = char_timeline[first_b.b][1]
                         t_last = char_timeline[min(len(char_timeline) - 1, last_b.b + last_b.size - 1)][2]
                         return t_first, t_last, prev_end, next_start
 
             first_words = matched[0].get("words", [])
             last_words = matched[-1].get("words", [])
-            t_first = first_words[0]["start"] if first_words else matched[0]["start"]
+            # 聲紋鎖定：若首句開頭有場外雜音單詞，跳至第一個合法主講人單詞
+            target_words = [w for w in first_words if w.get("is_target_speaker", True)]
+            if target_words:
+                t_first = target_words[0]["start"]
+            elif first_words:
+                t_first = first_words[0]["start"]
+            else:
+                t_first = matched[0]["start"]
+
             t_last = last_words[-1]["end"] if last_words else matched[-1]["end"]
             return t_first, t_last, prev_end, next_start
 
@@ -330,17 +400,19 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
                 w_norm = normalize_text(w["word"])
                 if not w_norm:
                     continue
+                w_is_target = w.get("is_target_speaker", True)
                 w_dur = (w["end"] - w["start"]) / len(w_norm)
                 for idx, ch in enumerate(w_norm):
                     ch_start = w["start"] + idx * w_dur
-                    char_timeline.append((ch, round(ch_start, 3), round(ch_start + w_dur, 3)))
+                    char_timeline.append((ch, round(ch_start, 3), round(ch_start + w_dur, 3), w_is_target))
         else:
             s_norm = normalize_text(s["text"])
             if s_norm:
+                s_is_target = s.get("is_target_speaker", True)
                 s_dur = (s["end"] - s["start"]) / len(s_norm)
                 for idx, ch in enumerate(s_norm):
                     ch_start = s["start"] + idx * s_dur
-                    char_timeline.append((ch, round(ch_start, 3), round(ch_start + s_dur, 3)))
+                    char_timeline.append((ch, round(ch_start, 3), round(ch_start + s_dur, 3), s_is_target))
 
     tgt_norm = normalize_text(transcript)
     whisper_str = ''.join([item[0] for item in char_timeline])
@@ -349,9 +421,19 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
         matcher = difflib.SequenceMatcher(None, tgt_norm, whisper_str)
         blocks = [b for b in matcher.get_matching_blocks() if b.size > 0]
         if blocks:
-            first_b = blocks[0]
+            # 聲紋鎖定：尋找第一個屬於合法主講人的字元
+            t_first = None
+            for b in blocks:
+                for c_idx in range(b.b, b.b + b.size):
+                    if char_timeline[c_idx][3]:  # is_target_speaker == True
+                        t_first = char_timeline[c_idx][1]
+                        break
+                if t_first is not None:
+                    break
+            if t_first is None:
+                t_first = char_timeline[blocks[0].b][1]
+
             last_b = blocks[-1]
-            t_first = char_timeline[first_b.b][1]
             t_last = char_timeline[min(len(char_timeline) - 1, last_b.b + last_b.size - 1)][2]
             return t_first, t_last, prev_end, next_start
 

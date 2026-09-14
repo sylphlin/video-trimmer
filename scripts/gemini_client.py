@@ -1,10 +1,13 @@
-"""Gemini API 互動：金鑰載入、prompt 組裝（含 prompt injection 基本防護）、
-影片上傳/快取重用、與 generate_content / interactions.create 呼叫（含重試）。
+"""Gemini API (Vertex AI + ADC) 互動模組：
+環境變數載入、ADC 憑證解析、prompt 組裝、GCS 視訊暫存與 generate_content 呼叫（含重試）。
+完全使用 Vertex AI 與 ADC 認證，移除 AI Studio API Key 與 Files API。
 """
 
 import json
 import logging
+import os
 import time
+import uuid
 from pathlib import Path
 
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -15,11 +18,12 @@ from .constants import (
     GEMINI_RETRY_WAIT_MIN_SEC,
 )
 from .exceptions import GeminiAPIError
+from .gcs_utils import guess_mime_type, upload_file_to_gcs
 from .transcribe import format_whisper_transcript_for_prompt
 
 logger = logging.getLogger(__name__)
 
-# 僅網路呼叫（上傳 / 輪詢 / 推論）適用重試，其餘本地運算不重試。
+# 僅網路呼叫（GCS 上傳 / Vertex AI 推論）適用重試，其餘本地運算不重試。
 # 最多 4 次嘗試（1 次原始呼叫 + 3 次重試），指數退避 1s -> 2s -> 4s。
 _network_retry = retry(
     stop=stop_after_attempt(GEMINI_RETRY_ATTEMPTS),
@@ -29,57 +33,107 @@ _network_retry = retry(
 
 
 @_network_retry
-def _upload_file(client, video_path):
-    return client.files.upload(file=str(video_path))
-
-
-@_network_retry
-def _get_file(client, name):
-    return client.files.get(name=name)
-
-
-@_network_retry
 def _generate_content(client, **kwargs):
     return client.models.generate_content(**kwargs)
 
 
-@_network_retry
-def _create_interaction(client, **kwargs):
-    return client.interactions.create(**kwargs)
-
-
-def load_gemini_api_key():
-    """載入 Gemini API Key，優先檢查環境變數，次之檢查本機 .env，再次之檢查 ~/.gemini/.env"""
-    import os
-
-    if os.environ.get("GEMINI_API_KEY"):
-        return os.environ["GEMINI_API_KEY"]
-
-    for candidate in [Path.cwd() / ".env", Path(__file__).parent / ".env", Path(__file__).parent.parent / ".env"]:
+def load_env_file():
+    """載入 KEY=VALUE 設定（如 GOOGLE_CLOUD_PROJECT），依序尋找 ~/.gemini/.env、當前目錄與專案目錄 .env。"""
+    candidates = [
+        Path.home() / ".gemini" / ".env",
+        Path.cwd() / ".env",
+        Path(__file__).parent / ".env",
+        Path(__file__).parent.parent / ".env",
+    ]
+    for env_path in candidates:
         try:
-            if candidate.exists():
-                for line in candidate.read_text(encoding="utf-8").splitlines():
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
                     line = line.strip()
-                    if line.startswith("GEMINI_API_KEY="):
-                        key = line.split("=", 1)[1].strip("\"'")
-                        os.environ["GEMINI_API_KEY"] = key
-                        return key
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.split("#")[0].strip().strip("\"'")
+                        if k and v and k not in os.environ:
+                            os.environ[k] = v
         except Exception:
-            pass
+            continue
 
-    try:
-        env_file = Path.home() / ".gemini" / ".env"
-        if env_file.exists():
-            for line in env_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("GEMINI_API_KEY="):
-                    key = line.split("=", 1)[1].strip("\"'")
-                    os.environ["GEMINI_API_KEY"] = key
-                    return key
-    except Exception:
-        pass
 
-    raise GeminiAPIError("未找到 GEMINI_API_KEY！請設置環境變數或建立 .env 檔案")
+def get_gemini_client(project_id: str = None, location: str = None):
+    """
+    初始化並回傳使用 Application Default Credentials (ADC) 的 Vertex AI GenAI Client。
+    專案解析順序：project_id 參數 > GOOGLE_CLOUD_PROJECT > GCP_PROJECT > ADC 預設專案。
+    位置解析順序：location 參數 > GOOGLE_CLOUD_LOCATION > GCP_REGION > 'global'。
+    """
+    from google import genai
+
+    load_env_file()
+    project = (
+        project_id
+        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or os.environ.get("GCP_PROJECT")
+    )
+    if not project:
+        try:
+            import google.auth
+            _, project = google.auth.default()
+        except Exception:
+            project = None
+    if not project:
+        raise GeminiAPIError(
+            "未找到 Google Cloud 專案！請於 CLI 傳入 --project，或在 .env 設置 GOOGLE_CLOUD_PROJECT，"
+            "或執行 `gcloud config set project <project_id>` 或 `gcloud auth application-default login`。"
+        )
+
+    region = (
+        location
+        or os.environ.get("GOOGLE_CLOUD_LOCATION")
+        or os.environ.get("GCP_REGION")
+        or "global"
+    )
+    return genai.Client(vertexai=True, project=project, location=region)
+
+
+def _unique_raw_blob_name(local_path: Path) -> str:
+    """產生暫態 raw/ 上傳的物件路徑，帶隨機 UUID 前綴避免並行衝突。"""
+    return f"raw/{uuid.uuid4().hex[:12]}_{local_path.name}"
+
+
+def stage_video_to_gcs(video_source: Path | str, bucket_name: str, gcs_client=None) -> tuple[str, str, bool]:
+    """
+    將影片暫存至 GCS 供 Vertex AI 調用。
+    若輸入本來就是 gs:// URI，則直接回傳 (gcs_uri, mime_type, False)，標記為非暫態（不主動清理）。
+    若為本地檔案，上傳至 gs://{bucket_name}/raw/... 並回傳 (gcs_uri, mime_type, True)，標記為暫態。
+    """
+    source_str = str(video_source).strip()
+    if source_str.startswith("gs://"):
+        mime_type = guess_mime_type(source_str)
+        return source_str, mime_type, False
+
+    video_path = Path(source_str).resolve()
+    if not video_path.is_file():
+        raise FileNotFoundError(f"找不到視訊檔案: {video_path}")
+
+    if not bucket_name:
+        raise GeminiAPIError(
+            "使用 Vertex AI 分析本地影片時需要指定 GCS Bucket！\n"
+            "請於命令列指定 --bucket <bucket_name>，或於 .env 中設置 VIDEO_TRIMMER_BUCKET=<bucket_name>。"
+        )
+
+    mime_type = guess_mime_type(video_path)
+    blob_name = _unique_raw_blob_name(video_path)
+    logger.info("上傳視訊至 Cloud Storage 暫存 (%.1f MB)...", video_path.stat().st_size / (1024 * 1024))
+    t0 = time.time()
+    gcs_uri = upload_file_to_gcs(
+        local_path=video_path,
+        bucket_name=bucket_name,
+        destination_blob_name=blob_name,
+        content_type=mime_type,
+        client=gcs_client,
+    )
+    logger.info("視訊上傳完畢 (耗時 %.1f 秒): %s", time.time() - t0, gcs_uri)
+    return gcs_uri, mime_type, True
 
 
 def load_prompt_template(prompt_file_candidates):
@@ -111,51 +165,6 @@ def build_prompt(prompt_file_candidates, script_path=None, whisper_units=None):
     return prompt
 
 
-def upload_or_reuse_video(client, video_path, upload_cache_path):
-    """上傳影片至 Gemini Files API，若有可重用之快取雲端檔案則直接重用。"""
-    video_file = None
-    if upload_cache_path.exists():
-        try:
-            cached_info = json.loads(upload_cache_path.read_text(encoding="utf-8"))
-            cached_name = cached_info.get("name")
-            check_file = _get_file(client, cached_name)
-            if check_file.state.name == "ACTIVE":
-                video_file = check_file
-                logger.info("✓ 重用快取之雲端視訊 (File ID: %s)", video_file.name)
-        except Exception:
-            pass
-
-    if video_file is None:
-        logger.info("上傳影片至 Gemini Files API (%.1f MB)...", video_path.stat().st_size / (1024 * 1024))
-        t0 = time.time()
-        try:
-            video_file = _upload_file(client, video_path)
-        except Exception as e:
-            raise GeminiAPIError(f"影片上傳至 Gemini Files API 失敗: {e}") from e
-        logger.info("上傳完畢 (耗時 %.1f 秒)。等待雲端轉碼 ACTIVE...", time.time() - t0)
-
-        while video_file.state.name == "PROCESSING":
-            time.sleep(3)
-            try:
-                video_file = _get_file(client, video_file.name)
-            except Exception as e:
-                raise GeminiAPIError(f"輪詢 Gemini 檔案處理狀態失敗: {e}") from e
-
-        if video_file.state.name != "ACTIVE":
-            raise GeminiAPIError(f"Gemini 處理失敗: {video_file.state.name}")
-
-        try:
-            upload_cache_path.write_text(json.dumps({
-                "name": video_file.name,
-                "uri": video_file.uri,
-                "timestamp": time.time()
-            }), encoding="utf-8")
-        except Exception:
-            pass
-
-    return video_file
-
-
 def _extract_text_from_response(response):
     if hasattr(response, "text") and response.text:
         return response.text
@@ -178,73 +187,39 @@ def _usage_from_generate_content(response):
     }
 
 
-def run_gemini_inference(client, types_module, model, video_file, prompt, agentic):
-    """調用 Gemini（Interactions API 或 Static generate_content）取得初剪決策 JSON 原始文字與 token 用量。"""
-    mime_type = video_file.mime_type or "video/mp4"
+def run_gemini_inference(client, types_module, model, gcs_uri, mime_type, prompt, agentic):
+    """調用 Vertex AI Gemini 取得初剪決策 JSON 原始文字與 token 用量。"""
     raw_json = ""
     usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
 
     t0 = time.time()
     if agentic:
-        try:
-            interaction = _create_interaction(
-                client,
-                model=model,
-                input=[
-                    {"type": "video", "uri": video_file.uri, "processing": "agentic"},
-                    {"type": "text", "text": prompt}
-                ]
-            )
-            raw_json = interaction.output_text or ""
-            iusage = getattr(interaction, "usage", None)
-            if iusage:
-                usage = {
-                    "prompt_tokens": getattr(iusage, "total_input_tokens", 0) or 0,
-                    "candidates_tokens": getattr(iusage, "total_output_tokens", 0) or 0,
-                    "thoughts_tokens": getattr(iusage, "total_thought_tokens", 0) or 0,
-                    "tool_use_tokens": getattr(iusage, "total_tool_use_tokens", 0) or 0,
-                    "total_tokens": getattr(iusage, "total_tokens", 0) or 0,
-                }
-        except Exception as e:
-            logger.info("Interactions API 遭遇異常 (%s)，降級調用 models.generate_content...", e)
-            video_part = types_module.Part(
-                file_data=types_module.FileData(file_uri=video_file.uri, mime_type=mime_type),
-                media_processing=types_module.MediaProcessing.AGENTIC
-            )
-            try:
-                response = _generate_content(
-                    client,
-                    model=model,
-                    contents=[video_part, prompt],
-                    config=types_module.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.0,
-                        max_output_tokens=8192
-                    )
-                )
-            except Exception as e2:
-                raise GeminiAPIError(f"Gemini API 呼叫失敗（Interactions 與降級 generate_content 皆失敗）: {e2}") from e2
-            raw_json = _extract_text_from_response(response)
-            usage = _usage_from_generate_content(response)
-    else:
+        logger.info("🤖 模式: Agentic Video Understanding (動態影格導航探索)")
         video_part = types_module.Part(
-            file_data=types_module.FileData(file_uri=video_file.uri, mime_type=mime_type)
+            file_data=types_module.FileData(file_uri=gcs_uri, mime_type=mime_type),
+            media_processing=types_module.MediaProcessing.AGENTIC,
         )
-        try:
-            response = _generate_content(
-                client,
-                model=model,
-                contents=[video_part, prompt],
-                config=types_module.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.0,
-                    max_output_tokens=8192
-                )
-            )
-        except Exception as e:
-            raise GeminiAPIError(f"Gemini generate_content 呼叫失敗: {e}") from e
-        raw_json = _extract_text_from_response(response)
-        usage = _usage_from_generate_content(response)
+    else:
+        logger.info("📺 模式: Static Multimodal Video (靜態多模態視訊)")
+        video_part = types_module.Part(
+            file_data=types_module.FileData(file_uri=gcs_uri, mime_type=mime_type)
+        )
 
+    try:
+        response = _generate_content(
+            client,
+            model=model,
+            contents=[video_part, prompt],
+            config=types_module.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.0,
+                max_output_tokens=8192,
+            ),
+        )
+    except Exception as e:
+        raise GeminiAPIError(f"Vertex AI Gemini generate_content 呼叫失敗: {e}") from e
+
+    raw_json = _extract_text_from_response(response)
+    usage = _usage_from_generate_content(response)
     duration = time.time() - t0
     return raw_json, usage, duration

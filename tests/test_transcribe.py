@@ -1,6 +1,10 @@
-"""transcribe.py 的離線單元測試：手寫假 segments，不需要真的跑 Whisper。"""
+import unittest
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    import tests
+    import pytest
 
 from scripts.transcribe import (
     merge_whisper_segments_to_sentences,
@@ -14,7 +18,7 @@ def _seg(id_, start, end, text, words=None):
     return {"id": id_, "start": start, "end": end, "text": text, "words": words or []}
 
 
-class TestMmssToSec:
+class TestMmssToSec(unittest.TestCase):
     def test_basic_conversion(self):
         # 724.8 代表 7分24.8秒 -> 444.8 秒
         assert mmss_to_sec(724.8) == pytest.approx(444.8)
@@ -26,7 +30,7 @@ class TestMmssToSec:
         assert mmss_to_sec(45) == 45
 
 
-class TestResolveTimestamp:
+class TestResolveTimestamp(unittest.TestCase):
     def test_within_duration_kept_as_absolute_seconds(self):
         assert resolve_timestamp(120.0, total_dur=300.0) == 120.0
 
@@ -34,7 +38,7 @@ class TestResolveTimestamp:
         assert resolve_timestamp(724.8, total_dur=300.0) == pytest.approx(444.8)
 
 
-class TestNormalizeText:
+class TestNormalizeText(unittest.TestCase):
     def test_strips_punctuation_and_lowercases(self):
         assert normalize_text("Hello, World!") == "helloworld"
 
@@ -42,7 +46,7 @@ class TestNormalizeText:
         assert normalize_text("你好，世界！") == "你好世界"
 
 
-class TestMergeWhisperSegmentsToSentences:
+class TestMergeWhisperSegmentsToSentences(unittest.TestCase):
     def test_empty_input_returns_empty_list(self):
         assert merge_whisper_segments_to_sentences([]) == []
 
@@ -100,3 +104,35 @@ class TestMergeWhisperSegmentsToSentences:
         sentences = merge_whisper_segments_to_sentences(segs)
         assert len(sentences) == 1
         assert sentences[0]["words"] == words_a + words_b
+
+    def test_target_speaker_change_forces_split(self):
+        """場外人員雜音 (is_target_speaker=False) 與主講人 (is_target_speaker=True) 強制分句"""
+        segs = [
+            {"id": 1, "start": 0.0, "end": 1.0, "text": "Action", "is_target_speaker": False, "speaker_id": "SPEAKER_CREW"},
+            {"id": 2, "start": 1.1, "end": 2.0, "text": "各位好", "is_target_speaker": True, "speaker_id": "SPEAKER_HOST"},
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 2
+        assert sentences[0]["is_target_speaker"] is False
+        assert sentences[1]["is_target_speaker"] is True
+
+    def test_speaker_turn_taking_forces_split(self):
+        """訪談中說話者輪替 (SPEAKER_00 vs SPEAKER_01) 強制分句"""
+        segs = [
+            {"id": 1, "start": 0.0, "end": 1.0, "text": "請問你怎麼看", "is_target_speaker": True, "speaker_id": "SPEAKER_00"},
+            {"id": 2, "start": 1.1, "end": 2.0, "text": "我覺得非常好", "is_target_speaker": True, "speaker_id": "SPEAKER_01"},
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 2
+        assert sentences[0]["speaker_id"] == "SPEAKER_00"
+        assert sentences[1]["speaker_id"] == "SPEAKER_01"
+
+    def test_long_pause_one_second_forces_split(self):
+        """超過 1.0 秒長停頓強制物理切句，即使是同一說話者且帶有連詞"""
+        segs = [
+            {"id": 1, "start": 0.0, "end": 1.0, "text": "前面講得不太順。", "is_target_speaker": True, "speaker_id": "SPEAKER_00"},
+            {"id": 2, "start": 2.1, "end": 3.0, "text": "但是重新來過", "is_target_speaker": True, "speaker_id": "SPEAKER_00"},
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 2
+

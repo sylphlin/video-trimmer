@@ -2,7 +2,11 @@
 
 import xml.etree.ElementTree as ET
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    import tests
+    import pytest
 
 from scripts.exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
 

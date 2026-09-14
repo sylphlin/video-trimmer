@@ -26,13 +26,23 @@ video-trimmer/
 ├── SKILL.md                          # Skill definition and agent reference manual
 ├── README.md                         # Public GitHub README documentation
 ├── LICENSE                           # MIT License
+├── .env.example                      # Environment variables template for Vertex AI & GCS
 ├── pyproject.toml                    # Standard Python packaging & CLI console scripts
 ├── requirements.txt                  # Python runtime dependencies
 ├── video_trimmer.py                  # Primary CLI entrypoint forwarder
 ├── auto_rough_cut.py                 # Backward-compatibility CLI wrapper
 ├── scripts/                          # Core implementation modules
 │   ├── __init__.py
-│   └── video_trimmer.py              # Master rough-cut orchestrator & acoustic engine
+│   ├── video_trimmer.py              # Master rough-cut orchestrator & acoustic engine
+│   ├── constants.py                  # Centrally managed named constants
+│   ├── exceptions.py                 # Custom exception hierarchy
+│   ├── acoustic.py                   # CPS, dynamic margins, text-locked acoustic bounds
+│   ├── transcribe.py                 # Whisper transcription, sentence merge, clip alignment
+│   ├── gemini_client.py              # Vertex AI (ADC) client & multimodal inference
+│   ├── gcs_utils.py                  # Google Cloud Storage upload & ephemeral cleanup
+│   ├── exporters.py                  # FCP7 XML / FCPXML / CSV generation
+│   └── render.py                     # ffprobe inspection & ffmpeg final render
+├── tests/                            # Offline unit tests
 ├── prompts/                          # Multimodal prompting specifications
 │   └── video_cut_prompt.md           # 5-rule subtraction & take selection prompt
 └── examples/                         # Verified project outputs & shooting scripts
@@ -47,24 +57,28 @@ video-trimmer/
 
 ## Key Capabilities & Architectural Pillars
 
-1. **Multimodal Native Understanding (Gemini 3.8 Flash)**:
+1. **Multimodal Native Understanding (Vertex AI Gemini 3.8 Flash)**:
    - Eliminates fragile text-only editing.
-   - Uploads raw footage directly via Gemini Files API / Interactions API to evaluate **presenter eye contact, facial expressions, stuttering, and retakes** simultaneously.
+   - Stages raw footage directly to Google Cloud Storage (GCS) with automatic ephemeral lifecycle cleanup.
+   - Evaluates presenter eye contact, facial expressions, stuttering, and retakes simultaneously via Vertex AI.
 2. **"Last Take Wins" Semantic Selection**:
    - Automatically detects presenter mistakes, line rehearsals, or multiple retakes of the same section, keeping strictly the final successful take.
-3. **Word-Level Acoustic Ground Truth Locking**:
+3. **Multimodal Active Speaker Diarization (Gemini 3.8 Flash)**:
+   - Evaluates on-camera visual cues (camera gaze, mouth articulatory sync, body language) and audio acoustics (close lavalier mic vs distant room echo).
+   - Accurately differentiates the on-screen target host from off-screen crew shouting section cues (e.g. "Action", "CTA-S2", "CDA84") and casual blooper chatter between takes, eliminating cumbersome local diarization models while maintaining flawless role separation.
+4. **Word-Level Acoustic Ground Truth Locking**:
    - Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA) extracts phoneme-aligned word timestamps.
    - Every cut boundary is physically anchored to acoustic reality rather than LLM timestamp approximations.
-4. **Acoustic Onset Snapping (Smart Gap Shortening)**:
+5. **Acoustic Onset Snapping (Smart Gap Shortening)**:
    - Scans the pre-speech dead air to snap cut-ins precisely **80ms before vocal cord vibration**, eliminating awkward pre-speech dead air and post-slate pauses.
-5. **Word Ground Truth Tail & Plosive Defense**:
+6. **Word Ground Truth Tail & Plosive Defense**:
    - Strictly enforces `true_speech_end >= t_last` with forward-only tracking down to ambient room noise.
    - Accommodates voiceless consonant plosive closures (e.g. `/t/`, `/p/`, `/k/` in words like「台」) and soft trailing nasal vowels without clipping word endings.
-6. **15ms Audio Equal-Power Micro-Crossfade**:
+7. **15ms Audio Equal-Power Micro-Crossfade**:
    - FFmpeg rendering injects 15ms `afade` micro-fades across all cut boundaries, completely eliminating digital pops, clicks, and background noise stepping.
-7. **Production Script Injection (`--script`)**:
+8. **Production Script Injection (`--script`)**:
    - Ingests production shooting scripts (`.md` / `.txt`) to guide section-by-section matching and prevent skipping intended talking points.
-8. **Universal NLE Project Export**:
+9. **Universal NLE Project Export**:
    - Generates industry-standard **FCP 7 XML** (Adobe Premiere Pro & DaVinci Resolve) and **FCPXML** (Final Cut Pro X), alongside direct high-quality **MP4** renders.
 
 ---
@@ -74,10 +88,14 @@ video-trimmer/
 When Antigravity, Claude Code, Cursor, or any compatible agent is instructed by the user to rough-cut or trim a raw video, follow this protocol:
 
 ### Step 1: Environment Verification
-Ensure FFmpeg is installed and `GEMINI_API_KEY` is configured:
+Ensure FFmpeg is installed and Google Cloud Application Default Credentials (ADC) are configured:
 ```bash
 ffmpeg -version
-export GEMINI_API_KEY="your_api_key_here"
+gcloud auth application-default login
+
+# Configure project & GCS bucket in .env (or ~/.gemini/.env)
+# GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+# VIDEO_TRIMMER_BUCKET=your-gcs-bucket
 ```
 
 ### Step 2: Execute Primary Video Trimmer Pipeline
@@ -110,13 +128,20 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 | :--- | :---: | :---: | :--- |
 | `--input` | `-i` | *(Required)* | Path to input raw video file (`.mp4`, `.mov`). |
 | `--output-dir` | `-o` | Same as video | Directory to save all generated output files. |
+| `--model` | `-m` | `gemini-3.8-flash` | Gemini model name (defaults to `$MODEL_NAME` or `gemini-3.8-flash`). |
+| `--project` | | `None` | Google Cloud Project ID (defaults to `$GOOGLE_CLOUD_PROJECT` or ADC). |
+| `--region` | | `None` | Vertex AI location/region (defaults to `$GOOGLE_CLOUD_LOCATION` or `global`). |
+| `--bucket` | | `None` | GCS bucket for video staging (defaults to `$VIDEO_TRIMMER_BUCKET`). |
+| `--keep-gcs-upload` | | `False` | Retain ephemeral staged video in GCS instead of deleting after inference. |
 | `--script` | `-s` | `None` | Path to production shooting script (`.md` / `.txt`). |
-| `--agentic` | | `False` | Enable Google Interactions API Agentic Video Understanding mode. |
+| `--agentic` | | `False` | Enable Agentic Video Understanding dynamic exploration mode. |
 | `--pacing` | `-p` | `auto` | Pacing style: `auto` (adaptive CPS), `compact`, `breathing`. |
 | `--cached-json`| | `None` | Path to existing EDL JSON to bypass cloud Gemini inference. |
 | `--suffix` | | `None` | Custom tag suffix for generated filenames. |
 | `--crf` | | `18` | FFmpeg H.264 rendering CRF parameter (18 = visually lossless). |
 | `--skip-whisper`| | `False` | Skip local Whisper transcription (use pure energy fallback). |
+| `--no-voiceprint`| | `False` | Disable sherpa-onnx offline speaker diarization & voiceprint lock. |
+| `--cast-threshold`| | `0.05` | Minimum speech duration ratio (default 5%) to qualify as target cast. |
 
 ---
 

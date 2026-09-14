@@ -19,15 +19,18 @@
    - Uploads raw footage directly via Gemini Files API / Interactions API to evaluate **presenter eye contact, facial expressions, stuttering, and retakes** simultaneously.
 2. **Intelligent "Last Take Wins" Selection**:
    - Automatically detects presenter mistakes, line rehearsals, or multiple retakes of the same section, keeping strictly the final successful take.
-3. **Acoustic Onset Snapping (Smart Gap Shortening)**:
+3. **Multimodal Active Speaker Diarization (Gemini 3.8 Flash)**:
+   - Seamlessly evaluates on-camera visual cues (camera gaze, mouth articulatory sync, body language) and audio acoustics (close lavalier mic vs distant room echo).
+   - Accurately differentiates the on-screen target host from off-screen crew shouting section cues (e.g. "Action", "CTA-S2", "CDA84") and casual blooper chatter between takes, eliminating cumbersome local diarization models while maintaining flawless role separation.
+4. **Acoustic Onset Snapping (Smart Gap Shortening)**:
    - Whisper timestamps often trigger 0.3s ~ 0.8s before the speaker actually begins vocalizing. `video-trimmer` dynamically scans the waveform to snap cuts precisely **80ms before vocal cord vibration**, eliminating awkward pre-speech dead air.
-4. **Adaptive Noise-Floor & Tail Tracking**:
+5. **Adaptive Noise-Floor & Tail Tracking**:
    - Dynamically analyzes localized ambient room noise to preserve subtle nasal endings (e.g. Japanese 「〜ございます」, nasal vowels, fading words) without clipping word tails.
-5. **15ms Audio Equal-Power Micro-Crossfade**:
+6. **15ms Audio Equal-Power Micro-Crossfade**:
    - Automatically injects 15ms micro-fades at every cut boundary in FFmpeg rendering, completely eliminating digital pops, clicks, and background noise stepping.
-6. **Production Script Injection (`--script`)**:
+7. **Production Script Injection (`--script`)**:
    - Optional support for feeding production shooting scripts or subtitles to guide section-by-section matching and avoid missing intended sections.
-7. **One-Click NLE Project Export**:
+8. **One-Click NLE Project Export**:
    - Generates industry-standard **FCP 7 XML** (Adobe Premiere Pro & DaVinci Resolve) and **FCPXML** (Final Cut Pro X), plus direct high-quality **MP4** renders.
 
 ---
@@ -41,6 +44,7 @@ video-trimmer/
 ├── SKILL.md                  # Standard Agent Skill specification & agent manual
 ├── README.md                 # Public GitHub documentation
 ├── LICENSE                   # MIT License
+├── .env.example              # Environment variables template for Vertex AI & GCS
 ├── pyproject.toml            # Modern PEP 621 Python packaging & console scripts
 ├── requirements.txt          # Python dependencies
 ├── video_trimmer.py          # Primary CLI entrypoint forwarder
@@ -52,10 +56,11 @@ video-trimmer/
 │   ├── exceptions.py         # Custom exception hierarchy
 │   ├── acoustic.py           # CPS, dynamic margins, text-locked acoustic bounds
 │   ├── transcribe.py         # Whisper transcription, sentence merge, clip alignment
-│   ├── gemini_client.py      # Gemini API key/prompt/upload/inference (with retry)
+│   ├── gemini_client.py      # Vertex AI (ADC) client & multimodal inference
+│   ├── gcs_utils.py          # Google Cloud Storage upload & ephemeral cleanup
 │   ├── exporters.py          # FCP7 XML / FCPXML / CSV generation
 │   └── render.py             # ffprobe inspection & ffmpeg final render
-├── tests/                    # Offline unit tests (synthetic audio & fixtures, pytest)
+├── tests/                    # Offline unit tests
 ├── prompts/
 │   └── video_cut_prompt.md   # Core multimodal prompting specification
 └── examples/                 # Sample project outputs (EDL, XML, FCPXML, JSON)
@@ -95,16 +100,27 @@ pip install mlx-whisper
 pip install -e .
 ```
 
-### 3. Configure Gemini API Key
+### 3. Authentication & Configuration (Vertex AI + ADC)
 
-Get an API Key from [Google AI Studio](https://aistudio.google.com/):
+This project exclusively uses **Google Cloud Vertex AI** with **Application Default Credentials (ADC)** and **Google Cloud Storage (GCS)** for video staging:
 
-```bash
-export GEMINI_API_KEY="your_api_key_here"
+1. **Authenticate once with Google Cloud**:
+   ```bash
+   gcloud auth application-default login
+   ```
 
-# Or save to ~/.gemini/.env
-echo 'GEMINI_API_KEY="your_api_key_here"' >> ~/.gemini/.env
-```
+2. **Configure your environment**:
+   Copy `.env.example` to `.env` (or configure `~/.gemini/.env`):
+   ```bash
+   cp .env.example .env
+   ```
+   Set your Google Cloud project and staging bucket:
+   ```bash
+   GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+   GOOGLE_CLOUD_LOCATION=global
+   VIDEO_TRIMMER_BUCKET=your-gcs-bucket-name
+   MODEL_NAME=gemini-3.8-flash
+   ```
 
 ---
 
@@ -144,8 +160,13 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 | :--- | :---: | :---: | :--- |
 | `--input` | `-i` | *(Required)* | Path to input raw video file (`.mp4`, `.mov`). |
 | `--output-dir` | `-o` | Same as video | Directory to save all output files. |
+| `--model` | `-m` | `gemini-3.8-flash` | Gemini model name (defaults to `$MODEL_NAME` or `gemini-3.8-flash`). |
+| `--project` | | `None` | Google Cloud Project ID (defaults to `$GOOGLE_CLOUD_PROJECT` or ADC). |
+| `--region` | | `None` | Vertex AI location/region (defaults to `$GOOGLE_CLOUD_LOCATION` or `global`). |
+| `--bucket` | | `None` | GCS bucket for video staging (defaults to `$VIDEO_TRIMMER_BUCKET`). |
+| `--keep-gcs-upload` | | `False` | Retain ephemeral staged video in GCS instead of deleting after inference. |
 | `--script` | `-s` | `None` | Path to production shooting script (`.md` / `.txt`). |
-| `--agentic` | | `False` | Enable Google Interactions API Agentic Video Understanding mode. |
+| `--agentic` | | `False` | Enable Agentic Video Understanding dynamic exploration mode. |
 | `--pacing` | `-p` | `auto` | Pacing style: `auto` (adaptive CPS), `compact`, `breathing`. |
 | `--cached-json`| | `None` | Path to existing EDL JSON to bypass cloud Gemini inference. |
 | `--suffix` | | `None` | Custom tag suffix for generated filenames. |
