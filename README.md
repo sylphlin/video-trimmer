@@ -10,6 +10,8 @@
 [![Apple Silicon Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-orange.svg)]()
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-5.0+-red.svg)](https://ffmpeg.org/)
 
+[English (en)](README.md) | [繁體中文 (zh-TW)](README.zh-TW.md) | [简体中文 (zh-CN)](README.zh-CN.md) | [日本語 (ja)](README.ja.md) | [한국어 (ko)](README.ko.md)
+
 ---
 
 ## 🌟 Key Highlights & Innovations
@@ -37,34 +39,38 @@
 
 ## 📂 Project Structure
 
-This project complies with the [Agent Skills Specification](https://agentskills.io/specification):
+This project complies with the [Agent Plugins 1.0 Specification](https://agent-plugins.org/) and the [Agent Skills Specification](https://agentskills.io/specification):
 
 ```text
 video-trimmer/
-├── SKILL.md                  # Standard Agent Skill specification & agent manual
-├── README.md                 # Public GitHub documentation
-├── LICENSE                   # MIT License
-├── .env.example              # Environment variables template for Vertex AI & GCS
-├── setup.sh                  # 100% Native gcloud GCP provisioning script (Zero Terraform)
-├── pyproject.toml            # Modern PEP 621 Python packaging & console scripts
-├── requirements.txt          # Python dependencies
-├── video_trimmer.py          # Primary CLI entrypoint forwarder
-├── auto_rough_cut.py         # Backward compatibility wrapper
-├── scripts/                  # Core engine modules
+├── plugin.json                 # Agent Plugins 1.0 specification manifest
+├── rules/
+│   └── AGENTS.md               # Strict read-only & fail-fast operational invariants for AI clients
+├── AGENTS.md                   # Permanent project invariants & developer rules (ASD-STE100 English)
+├── SKILL.md                    # Standard Agent Skill specification & agent manual
+├── README.md                   # Public GitHub documentation
+├── LICENSE                     # MIT License
+├── .env.example                # Environment variables template for Vertex AI & GCS
+├── setup.sh                    # 100% Native gcloud GCP provisioning script (Zero Terraform)
+├── pyproject.toml              # Modern PEP 621 Python packaging & console scripts
+├── requirements.txt            # Python dependencies
+├── video_trimmer.py            # Primary CLI entrypoint forwarder
+├── auto_rough_cut.py           # Backward compatibility wrapper
+├── scripts/                    # Core engine modules
 │   ├── __init__.py
-│   ├── video_trimmer.py      # CLI (argparse) + pipeline orchestration (main())
-│   ├── constants.py          # Centrally managed named constants
-│   ├── exceptions.py         # Custom exception hierarchy
-│   ├── acoustic.py           # CPS, dynamic margins, text-locked acoustic bounds
-│   ├── transcribe.py         # Whisper transcription, sentence merge, clip alignment
-│   ├── gemini_client.py      # Vertex AI (ADC) client & multimodal inference
-│   ├── gcs_utils.py          # Google Cloud Storage upload & ephemeral cleanup
-│   ├── exporters.py          # FCP7 XML / FCPXML / CSV generation
-│   └── render.py             # ffprobe inspection & ffmpeg final render
-├── tests/                    # Offline unit tests
+│   ├── video_trimmer.py        # CLI (argparse) + pipeline orchestration (main())
+│   ├── constants.py            # Centrally managed named constants
+│   ├── exceptions.py           # Custom exception hierarchy
+│   ├── acoustic.py             # CPS, dynamic margins, text-locked acoustic bounds
+│   ├── transcribe.py           # Whisper transcription, sentence merge, clip alignment
+│   ├── gemini_client.py        # Vertex AI (ADC) client & multimodal inference
+│   ├── gcs_utils.py            # Google Cloud Storage upload & ephemeral cleanup
+│   ├── exporters.py            # FCP7 XML / FCPXML / CSV generation
+│   └── render.py               # ffprobe inspection & ffmpeg final render
+├── tests/                      # Offline unit tests
 ├── prompts/
-│   └── video_cut_prompt.md   # Core multimodal prompting specification
-└── examples/                 # Sample project outputs (EDL, XML, FCPXML, JSON)
+│   └── video_cut_prompt.md     # Core multimodal prompting specification
+└── examples/                   # Sample project outputs (EDL, XML, FCPXML, JSON)
 ```
 
 ---
@@ -83,9 +89,35 @@ brew install ffmpeg
 sudo apt update && sudo apt install -y ffmpeg
 ```
 
-### 2. Installation
+### 2. Installation & Deployment
 
-Clone the repository and install dependencies:
+#### Method A: Google Antigravity & Agent Plugins 1.0 Installation (Recommended for AI Agents)
+
+Install directly into Google Antigravity or any [Agent Plugins 1.0](https://agent-plugins.org/) compatible client as an Agent Plugin/Skill:
+
+1. **Install as an Agent Plugin (Recommended - automatically loads `plugin.json` and strict read-only execution invariants in `rules/AGENTS.md`)**:
+   - **Global Plugin** (available across all projects and workspaces, recommended):
+     ```bash
+     git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
+     ```
+   - **Workspace Plugin** (scoped to current workspace):
+     ```bash
+     git clone https://github.com/sylphlin/video-trimmer.git .agents/plugins/video-trimmer
+     ```
+
+2. **Or Install as an Agent Skill**:
+   - **Global Skill**:
+     ```bash
+     git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/skills/video-trimmer
+     ```
+   - **Workspace Skill**:
+     ```bash
+     git clone https://github.com/sylphlin/video-trimmer.git .agent/skills/video-trimmer
+     ```
+
+#### Method B: Standalone Python CLI Installation
+
+Clone the repository and install dependencies locally:
 
 ```bash
 git clone https://github.com/sylphlin/video-trimmer.git

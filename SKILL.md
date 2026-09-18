@@ -19,10 +19,14 @@ Tailored for talking-head videos, tech explainers, video podcasts, tutorials, an
 
 ## Directory Structure
 
-This skill strictly complies with the [Agent Skills Specification](https://agentskills.io/specification):
+This project complies with the [Agent Plugins 1.0 Specification](https://agent-plugins.org/) and the [Agent Skills Specification](https://agentskills.io/specification):
 
 ```text
 video-trimmer/
+├── plugin.json                       # Agent Plugins 1.0 specification manifest
+├── rules/
+│   └── AGENTS.md                     # Strict read-only & fail-fast operational invariants for AI clients
+├── AGENTS.md                         # Permanent project invariants & developer rules (ASD-STE100 English)
 ├── SKILL.md                          # Skill definition and agent reference manual
 ├── README.md                         # Public GitHub README documentation
 ├── LICENSE                           # MIT License

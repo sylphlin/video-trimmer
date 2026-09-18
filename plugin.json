@@ -1,0 +1,26 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "video-trimmer",
+  "version": "1.0.0",
+  "description": "AI-Powered Smart Video Trimmer and rough-cut engine. Features Gemini 3.8 Flash Multimodal Video Understanding (native video, no hallucinated cuts, last-take-wins), Whisper word-level acoustic ground truth, acoustic onset snapping, 15ms audio equal-power micro-crossfade, and multi-format NLE project export (Premiere Pro XML, DaVinci Resolve XML, Final Cut Pro FCPXML).",
+  "author": {
+    "name": "sylphlin",
+    "url": "https://github.com/sylphlin"
+  },
+  "homepage": "https://github.com/sylphlin/video-trimmer",
+  "repository": "https://github.com/sylphlin/video-trimmer",
+  "license": "MIT",
+  "keywords": [
+    "video-trimmer",
+    "rough-cut",
+    "video-editing",
+    "gemini",
+    "vertex-ai",
+    "whisper",
+    "fcpxml",
+    "premiere-pro",
+    "davinci-resolve",
+    "multimodal-video",
+    "acoustic-snapping"
+  ]
+}
