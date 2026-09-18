@@ -168,3 +168,16 @@ For an input file `video.mp4`, the skill generates:
 ## License
 
 [MIT License](LICENSE) © 2026 sylphlin
+
+
+---
+
+## ☁️ Google Drive Direct Link & GCS Smart Caching (ADC)
+
+`video-trimmer` natively supports passing Google Drive file links (`https://drive.google.com/file/d/.../view` or `gdrive://...`) directly to `-i / --input`:
+- Authenticated 100% via Application Default Credentials (`gcloud auth application-default login --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"`).
+- Automatically checks remote MD5 (`md5Checksum`) to cache locally in `<output_dir>/gdrive_inputs/` and checks `sha256` / `gdrive_md5` metadata on `gs://${VIDEO_TRIMMER_BUCKET}/raw/` to skip redundant GCS uploads.
+- Example:
+  ```bash
+  python3 video_trimmer.py -i "https://drive.google.com/file/d/YOUR_VIDEO_FILE_ID/view?usp=sharing" --agentic -o output/
+  ```

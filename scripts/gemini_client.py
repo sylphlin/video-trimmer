@@ -96,8 +96,8 @@ def get_gemini_client(project_id: str = None, location: str = None):
 
 
 def _unique_raw_blob_name(local_path: Path) -> str:
-    """產生暫態 raw/ 上傳的物件路徑，帶隨機 UUID 前綴避免並行衝突。"""
-    return f"raw/{uuid.uuid4().hex[:12]}_{local_path.name}"
+    """產生暫態 raw/ 上傳的確定性物件路徑（供 SHA-256 / MD5 快取命中與 2 天 Lifecycle 自動清理）。"""
+    return f"raw/{local_path.name}"
 
 
 def stage_video_to_gcs(video_source: Path | str, bucket_name: str, gcs_client=None) -> tuple[str, str, bool]:

@@ -296,6 +296,55 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 
 ---
 
+---
+
+## ☁️ Google Drive 雲端硬碟直通與 GCS Lifecycle 自動清理規則 (ADC 零金鑰直連)
+
+在實務製作流程中，攝影師常將單機 NG 毛片直接上傳至 **Google Drive（個人雲端硬碟或團隊共用雲端硬碟 Shared Drives）**。`video-trimmer` 支援透過 `gcloud` ADC（`drive.readonly` 權限）直接讀取 Google Drive 分享連結，並搭配 GCS 雙層智慧快取與自動清理：
+
+### 1. 一鍵啟用雲端環境與 Google Drive 權限 (`./setup.sh`)
+```bash
+# 步驟 1：登入 ADC 並授予 Google Drive 唯讀權限
+gcloud auth application-default login \
+  --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
+
+# 步驟 2：一鍵啟用 Vertex AI / GCS / Drive API、建立儲存桶並掛載雙層 Lifecycle 規則
+./setup.sh --project YOUR_GCP_PROJECT_ID
+```
+
+### 2. 📌 Google Drive 支援情境與實戰範例
+
+| 支援情境 | 輸入參數格式 | 智慧快取與自動處理行為 |
+| :--- | :--- | :--- |
+| **情境 A：Google Drive 毛片直接粗剪**<br/>*(免手動從瀏覽器下載)* | `-i "https://drive.google.com/file/d/<FILE_ID>/view"`<br/>或 `-i "gdrive://<FILE_ID>"` | 透過 Drive API v3 驗證遠端 `md5Checksum`，自動快取至 `<output_dir>/gdrive_inputs/` 供本地 Whisper 詞級轉錄與 FFmpeg 渲染，並自動轉存至 GCS `raw/`（若遠端 `sha256` / `gdrive_md5` 已相符則秒級跳過上傳）。 |
+| **情境 B：搭配雲端或本地講稿進行選鏡**<br/>*(Last-Take-Wins 對稿粗剪)* | `-i "<Google Drive 影片連結>"`<br/>`-s script.md --agentic` | 自動比對拍攝講稿與多次重錄 (Retakes)，保留最後一次完美 Take 並切除廢話與停頓，匯出 `.mp4`、`.xml` (Premiere/Resolve) 與 `.fcpxml` (Final Cut Pro)。 |
+| **情境 C：GCS 既有雲端物件直連推論** | `-i "gs://video-preprocessing-proj/raw/take1.mp4"` | 若影片已位於 GCS，Vertex AI 直接讀取該 `gs://` URI，零重複上傳。 |
+
+#### 💻 CLI 實戰指令範例：
+```bash
+# 【情境 A】直接貼上 Google Drive 毛片連結執行 Agentic Video 智慧粗剪並輸出 NLE 時間線：
+python3 video_trimmer.py \
+  -i "https://drive.google.com/file/d/1RawTakeVideoIdxxxxxx/view?usp=sharing" \
+  --agentic -o output/
+
+# 【情境 B】Google Drive 毛片連結 + 拍攝講稿對齊 + 緊湊節奏模式：
+python3 video_trimmer.py \
+  -i "https://drive.google.com/file/d/1RawTakeVideoIdxxxxxx/view?usp=sharing" \
+  -s shooting_script.md --pacing compact --agentic -o output/
+```
+
+#### 💬 Antigravity Agent 自然語言對話範例：
+> 「幫我把這支放在 Google Drive 上的訪談毛片自動剪掉 NG 重錄、口誤與超過 0.5 秒的空白停頓，輸出 Premiere XML 與粗剪成片：`https://drive.google.com/file/d/1RawTakeVideoIdxxxxxx/view?usp=sharing`」
+
+### 3. 🗑️ GCS Bucket Lifecycle 雙層自動清理規則 (`raw/` 2天 / 產出物 15天)
+
+| GCS 路徑前綴 (`matchesPrefix`) | 儲存檔案類型 | 保留期限 (`age`) | 規則說明 |
+| :--- | :--- | :--- | :--- |
+| **`raw/`** | 供 Vertex AI 推論暫存之原始視訊 (`raw/<filename>.mp4`) | **2 天 (`age: 2`)** | 保留 2 天讓同專案重複微調參數（如 `--pacing`）時秒級命中 `sha256` / `gdrive_md5` 快取免重傳，2 天後由 GCS 自動刪除。 |
+| **`output/`、`deliverables/`、`trimmed/`** | 雲端備份之粗剪成片、XML/FCPXML 時間線與 JSON/CSV 報告 | **15 天 (`age: 15`)** | 產出物保留 15 天供團隊下載與審閱，15 天後自動清理。 |
+
+---
+
 ## 開發與測試
 
 執行離線單元測試（使用合成音訊與固定測試夾具，無須連接真實視訊或 API）：

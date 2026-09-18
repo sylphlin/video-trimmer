@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from scripts.gcs_utils import (
+    is_gdrive_source,
+    parse_gdrive_url,
     delete_gcs_blob,
     get_gcs_client,
     guess_mime_type,
@@ -92,6 +94,25 @@ class TestGCSUtils(unittest.TestCase):
 
         # Should not raise exception
         delete_gcs_blob("gs://my-bucket/raw/missing.mp4", client=mock_client)
+
+
+
+    def test_is_gdrive_source(self):
+        self.assertTrue(is_gdrive_source("https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz123456/view"))
+        self.assertTrue(is_gdrive_source("https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz123456"))
+        self.assertTrue(is_gdrive_source("gdrive://1AbCdEfGhIjKlMnOpQrStUvWxYz123456"))
+        self.assertFalse(is_gdrive_source("/tmp/local_video.mp4"))
+        self.assertFalse(is_gdrive_source("gs://bucket/raw/video.mp4"))
+
+    def test_parse_gdrive_url(self):
+        self.assertEqual(
+            parse_gdrive_url("https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz123456/view?usp=sharing"),
+            {"id": "1AbCdEfGhIjKlMnOpQrStUvWxYz123456", "type": "file"},
+        )
+        self.assertEqual(
+            parse_gdrive_url("https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz123456"),
+            {"id": "1AbCdEfGhIjKlMnOpQrStUvWxYz123456", "type": "folder"},
+        )
 
 
 if __name__ == "__main__":

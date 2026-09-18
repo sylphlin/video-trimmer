@@ -37,7 +37,7 @@ from .acoustic import refine_speech_bounds_locked
 from .constants import ALLOWED_INPUT_EXTENSIONS
 from .exceptions import InvalidInputError, VideoTrimmerError
 from .exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
-from .gcs_utils import delete_gcs_blob
+from .gcs_utils import delete_gcs_blob, is_gdrive_source, download_gdrive_file_with_cache
 from .gemini_client import (
     build_prompt,
     get_gemini_client,
@@ -82,13 +82,25 @@ def _append_usage_log(out_dir, video_path, model, usage, mode, duration):
 
 
 def _run(args):
-    video_path = Path(args.input).resolve()
-    if not video_path.exists():
-        raise InvalidInputError(f"找不到影片檔案 {video_path}")
-    _validate_input_extension(video_path)
+    if is_gdrive_source(args.input):
+        out_dir = Path(args.output_dir).resolve() if args.output_dir else Path.cwd()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            video_path = download_gdrive_file_with_cache(
+                args.input,
+                target_dir=out_dir / "gdrive_inputs",
+                project_id=args.project,
+            )
+        except Exception as e:
+            raise InvalidInputError(f"從 Google Drive 讀取影片失敗: {e}") from e
+    else:
+        video_path = Path(args.input).resolve()
+        if not video_path.exists():
+            raise InvalidInputError(f"找不到影片檔案 {video_path}")
+        out_dir = Path(args.output_dir).resolve() if args.output_dir else video_path.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    out_dir = Path(args.output_dir).resolve() if args.output_dir else video_path.parent
-    out_dir.mkdir(parents=True, exist_ok=True)
+    _validate_input_extension(video_path)
     base_name = video_path.stem
 
     # 決定輸出檔案標籤
@@ -269,7 +281,7 @@ def main():
     default_model = os.environ.get("MODEL_NAME") or os.environ.get("TRIMMER_MODEL") or "gemini-3.8-flash"
 
     parser = argparse.ArgumentParser(description="video-trimmer: AI-Powered Smart Video Trimmer (Whisper Ground-Truth + Vertex AI Gemini)")
-    parser.add_argument("--input", "-i", required=True, help="輸入影片檔案路徑 (MP4/MOV)")
+    parser.add_argument("--input", "-i", required=True, help="輸入影片檔案路徑 (MP4/MOV) 或 Google Drive 分享連結 (https://drive.google.com/... / gdrive://...)")
     parser.add_argument("--output-dir", "-o", default=None, help="輸出資料夾 (預設為影片所在目錄)")
     parser.add_argument("--model", "-m", default=default_model, help=f"使用的 Gemini 模型名稱 (預設: {default_model})")
     parser.add_argument("--project", default=None, help="Google Cloud 專案 ID (預設讀取 GOOGLE_CLOUD_PROJECT/GCP_PROJECT 或 ADC)")

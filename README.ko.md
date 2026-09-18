@@ -312,3 +312,26 @@ python3 -m unittest discover tests
 ## 라이선스
 
 [MIT License](LICENSE) © 2026 sylphlin
+
+
+---
+
+## ☁️ Google Drive 직결 시나리오 및 GCS 수명 주기 자동 삭제 규칙 (ADC 인증)
+
+`video-trimmer`는 `gcloud` ADC (`drive.readonly` 권한)를 통해 Google Drive 공유 링크(`https://drive.google.com/file/d/.../view`)를 직접 입력받아 MD5/SHA-256 캐싱과 함께 자동으로 가편집을 수행합니다.
+
+```bash
+# Step 1: Google Drive 읽기 권한을 포함하여 ADC 로그인
+gcloud auth application-default login \
+  --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
+./setup.sh --project YOUR_GCP_PROJECT_ID
+
+# Step 2: Google Drive 원본 영상 링크를 직접 전달하여 Agentic 가편집 실행
+python3 video_trimmer.py \
+  -i "https://drive.google.com/file/d/1RawTakeVideoIdxxxxxx/view?usp=sharing" \
+  --agentic -o output/
+```
+
+- **GCS 2단계 수명 주기 규칙**: `raw/` (임시 스테이징 영상)는 **2일 (`age: 2`)** 보관 후 자동 삭제되며, `output/`, `deliverables/`, `trimmed/` (완성본 및 XML 산출물)는 **15일 (`age: 15`)** 보관 후 자동 삭제됩니다.
+
+---

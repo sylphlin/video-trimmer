@@ -157,6 +157,38 @@ echo "[✓] Storage Bucket:     gs://$BUCKET_NAME"
 echo "[✓] Service Account:    $SERVICE_ACCOUNT"
 
 # ------------------------------------------------------------------------------
+# 3.5. Enable Required Google Cloud APIs & Verify ADC (with Google Drive Scope)
+# ------------------------------------------------------------------------------
+echo ""
+echo "[*] Enabling required Google Cloud APIs (Vertex AI, GCS, Google Drive)..."
+if [ "$DRY_RUN" = false ]; then
+    gcloud services enable \
+        aiplatform.googleapis.com \
+        storage.googleapis.com \
+        drive.googleapis.com \
+        --project="$PROJECT_ID" --quiet 2>/dev/null || true
+    echo "    [✓] Enabled aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com."
+
+    ADC_SCOPES="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
+    ADC_TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null || true)"
+    if [ -z "$ADC_TOKEN" ]; then
+        echo "    [!] ADC not found. Launching login with Cloud Platform & Google Drive Read-Only scopes..."
+        gcloud auth application-default login --scopes="$ADC_SCOPES"
+    else
+        TOKEN_INFO="$(curl -s "https://oauth2.googleapis.com/tokeninfo?access_token=${ADC_TOKEN}" || true)"
+        if ! echo "$TOKEN_INFO" | grep -q "drive"; then
+            echo "    [!] Tip: To enable direct Google Drive link/folder ingestion, run:"
+            echo "        gcloud auth application-default login --scopes=\"$ADC_SCOPES\""
+        else
+            echo "    [✓] ADC verified with Google Drive Read-Only scope."
+        fi
+    fi
+    gcloud auth application-default set-quota-project "$PROJECT_ID" --quiet 2>/dev/null || true
+else
+    echo "    [Dry-Run] Would enable aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com and verify ADC scopes."
+fi
+
+# ------------------------------------------------------------------------------
 # 4. Step 1: Storage Bucket Provisioning (Uniform Access, CORS, Lifecycle)
 # ------------------------------------------------------------------------------
 echo ""
@@ -204,13 +236,20 @@ EOF
         "age": 2,
         "matchesPrefix": ["raw/"]
       }
+    },
+    {
+      "action": {"type": "Delete"},
+      "condition": {
+        "age": 15,
+        "matchesPrefix": ["output/", "deliverables/", "trimmed/"]
+      }
     }
   ]
 }
 EOF
     gcloud storage buckets update "gs://$BUCKET_NAME" --lifecycle-file="$LIFECYCLE_FILE" --quiet 2>/dev/null || true
     rm -f "$LIFECYCLE_FILE"
-    echo "    [✓] Applied lifecycle rule (auto-delete raw/ after 2 days)."
+    echo "    [✓] Applied two-tier lifecycle rules (raw/: 2 days, output/deliverables/trimmed/: 15 days)."
 else
     echo "    [Dry-Run] Would ensure GCS bucket gs://$BUCKET_NAME exists with CORS & 2-day ephemeral auto-delete on raw/."
 fi
@@ -338,7 +377,7 @@ echo "Service Account:$SERVICE_ACCOUNT"
 echo ""
 echo "Next steps:"
 echo "1. Authenticate locally with Application Default Credentials (ADC):"
-echo "   gcloud auth application-default login"
+echo "   gcloud auth application-default login --scopes=\"https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly\""
 echo ""
 echo "2. Run Video Trimmer on your video:"
 echo "   python video_trimmer.py -i \"/path/to/raw_footage.mp4\""

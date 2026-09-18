@@ -296,6 +296,39 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 
 ---
 
+---
+
+## ☁️ Google Drive 云端硬盘直通与 GCS Lifecycle 自动清理规则 (ADC 零密钥直连)
+
+在实际制作流程中，摄影师常将单机 NG 毛片直接上传至 **Google Drive（个人云端硬盘或团队共享云端硬盘 Shared Drives）**。`video-trimmer` 支持通过 `gcloud` ADC（`drive.readonly` 权限）直接读取 Google Drive 分享链接，并搭配 GCS 双层智能缓存与自动清理：
+
+### 1. 一键启用云端环境与 Google Drive 权限 (`./setup.sh`)
+```bash
+gcloud auth application-default login \
+  --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
+./setup.sh --project YOUR_GCP_PROJECT_ID
+```
+
+### 2. 📌 Google Drive 支持情境与实战范例
+
+| 支持情境 | 输入参数格式 | 智能缓存与自动处理行为 |
+| :--- | :--- | :--- |
+| **情境 A：Google Drive 毛片直接粗剪** | `-i "https://drive.google.com/file/d/<FILE_ID>/view"` | 通过 Drive API v3 校验远程 `md5Checksum` 并缓存至 `<output_dir>/gdrive_inputs/`，自动转存至 GCS `raw/`（若远程 `sha256` / `gdrive_md5` 已匹配则秒级跳过上传）。 |
+| **情境 B：搭配讲稿进行选镜粗剪** | `-i "<Google Drive 视频链接>" -s script.md --agentic` | 自动比对讲稿与多次重录，保留最佳 Take 并导出 `.mp4`、`.xml` 与 `.fcpxml`。 |
+
+```bash
+# 直接粘贴 Google Drive 毛片链接执行 Agentic Video 智能粗剪：
+python3 video_trimmer.py \
+  -i "https://drive.google.com/file/d/1RawTakeVideoIdxxxxxx/view?usp=sharing" \
+  --agentic -o output/
+```
+
+### 3. 🗑️ GCS 存储桶双阶生命周期规则 (`raw/` 2天 / 产出物 15天)
+- **`raw/`**：保留 **2 天 (`age: 2`)**（供同日调校秒级命中 `sha256`/`gdrive_md5` 缓存，2 天后自动删除）。
+- **`output/`、`deliverables/`、`trimmed/`**：产出物保留 **15 天 (`age: 15`)** 供团队审阅下载。
+
+---
+
 ## 开发与测试
 
 运行离线单元测试（使用合成音频与固定测试夹具，无需连接真实视频或 API）：

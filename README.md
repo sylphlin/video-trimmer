@@ -292,6 +292,55 @@ For an input file `take 1.mp4`, `video-trimmer` produces:
 
 ---
 
+---
+
+## ☁️ Google Drive Direct Links & GCS Lifecycle Policy (100% ADC Integration)
+
+In real-world workflows, raw single-camera takes are often uploaded directly to **Google Drive (My Drive or Shared Drives)**. `video-trimmer` natively accepts Google Drive share links via `gcloud` ADC (`drive.readonly` scope) with smart MD5/SHA-256 caching:
+
+### 1. One-Click Cloud & Google Drive Setup (`./setup.sh`)
+```bash
+# Step 1: Authenticate ADC with Google Drive Read-Only scope
+gcloud auth application-default login \
+  --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
+
+# Step 2: Provision Vertex AI / GCS / Drive APIs, bucket, and two-tier Lifecycle rules
+./setup.sh --project YOUR_GCP_PROJECT_ID
+```
+
+### 2. 📌 Supported Google Drive Scenarios & Examples
+
+| Scenario | Input Flag Syntax | Smart Caching & Automated Behavior |
+| :--- | :--- | :--- |
+| **Scenario A: Direct Google Drive Raw Footage Rough-Cut**<br/>*(Zero manual browser download)* | `-i "https://drive.google.com/file/d/<FILE_ID>/view"`<br/>or `-i "gdrive://<FILE_ID>"` | Verifies remote `md5Checksum` via Drive API v3, caches locally in `<output_dir>/gdrive_inputs/` for local Whisper word-level ground truth & FFmpeg rendering, and stages to GCS `raw/` (skipping GCS upload if `sha256`/`gdrive_md5` already matches). |
+| **Scenario B: Script-Guided Cloud Rough-Cut**<br/>*(Last-Take-Wins with shooting script)* | `-i "<GDRIVE_VIDEO_LINK>"`<br/>`-s script.md --agentic` | Matches retakes against your shooting script, keeps the best final take, snaps silences, and exports `.mp4`, `.xml` (Premiere/Resolve), and `.fcpxml` (Final Cut Pro). |
+| **Scenario C: Direct GCS URI Input** | `-i "gs://video-preprocessing-proj/raw/take1.mp4"` | Directly references the existing GCS object in Vertex AI without re-uploading. |
+
+#### 💻 Practical CLI Examples:
+```bash
+# [Scenario A] Trim a raw video directly from a Google Drive share link using Agentic Video mode:
+python3 video_trimmer.py \
+  -i "https://drive.google.com/file/d/1RawTakeVideoIdxxxxxx/view?usp=sharing" \
+  --agentic -o output/
+
+# [Scenario B] Google Drive raw footage + shooting script alignment + compact pacing:
+python3 video_trimmer.py \
+  -i "https://drive.google.com/file/d/1RawTakeVideoIdxxxxxx/view?usp=sharing" \
+  -s shooting_script.md --pacing compact --agentic -o output/
+```
+
+#### 💬 Antigravity Agent Conversational Prompt Example:
+> *"Trim the bad takes, stutters, and dead air from this raw footage on Google Drive, and export a DaVinci Resolve / Premiere XML timeline plus trimmed MP4: `https://drive.google.com/file/d/1RawTakeVideoIdxxxxxx/view?usp=sharing`"*
+
+### 3. 🗑️ Two-Tier GCS Bucket Lifecycle Policy (`raw/` 2 Days / Deliverables 15 Days)
+
+| GCS Path Prefix (`matchesPrefix`) | Stored Assets | Retention Period (`age`) | Rationale |
+| :--- | :--- | :--- | :--- |
+| **`raw/`** | Staged raw videos (`raw/<filename>.mp4`) | **2 Days (`age: 2`)** | Retains staged media for 2 days so repeated runs hit the `sha256` / `gdrive_md5` cache instantaneously, then auto-deletes. |
+| **`output/`**, **`deliverables/`**, **`trimmed/`** | Trimmed videos, NLE XML/FCPXML timelines, EDL reports | **15 Days (`age: 15`)** | Retains deliverables for 15 days for team review before automatic cleanup. |
+
+---
+
 ## 🧪 Development & Testing
 
 Offline unit tests (synthetic audio, handwritten fixtures — no real video/API calls needed):
