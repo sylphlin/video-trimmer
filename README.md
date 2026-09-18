@@ -47,9 +47,9 @@ video-trimmer/
 ├── rules/
 │   └── AGENTS.md               # Strict read-only & fail-fast operational invariants for AI clients
 ├── skills/
-│   └── video-trimmer/          # Plugin skill bundle (SKILL.md, scripts, prompts)
+│   └── video-trimmer/
+│       └── SKILL.md            # Standard Agent Skill specification & agent manual
 ├── AGENTS.md                   # Permanent project invariants & developer rules (ASD-STE100 English)
-├── SKILL.md                    # Standard Agent Skill specification & agent manual
 ├── README.md                   # Public GitHub documentation
 ├── LICENSE                     # MIT License
 ├── .env.example                # Environment variables template for Vertex AI & GCS
@@ -105,16 +105,6 @@ Install directly into Google Antigravity or any [Agent Plugins 1.0](https://agen
    - **Workspace Plugin** (scoped to current workspace):
      ```bash
      git clone https://github.com/sylphlin/video-trimmer.git .agents/plugins/video-trimmer
-     ```
-
-2. **Or Install as an Agent Skill**:
-   - **Global Skill**:
-     ```bash
-     git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/skills/video-trimmer
-     ```
-   - **Workspace Skill**:
-     ```bash
-     git clone https://github.com/sylphlin/video-trimmer.git .agent/skills/video-trimmer
      ```
 
 #### Method B: Standalone Python CLI Installation

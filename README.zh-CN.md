@@ -47,9 +47,9 @@ video-trimmer/
 ├── rules/
 │   └── AGENTS.md               # 外部 AI Client 运行期守则（严格只读与 Fail-Fast 防护）
 ├── skills/
-│   └── video-trimmer/          # 插件技能组合包（SKILL.md、scripts、prompts）
+│   └── video-trimmer/
+│       └── SKILL.md            # Agent Skill 规范文件与执行指引
 ├── AGENTS.md                   # 项目长期维护与开发守则（ASD-STE100 英文标准）
-├── SKILL.md                    # Agent Skill 规范文件与执行指引
 ├── README.md                   # 公开说明文件（英文）
 ├── README.zh-TW.md             # 公开说明文件（繁体中文）
 ├── README.zh-CN.md             # 公开说明文件（简体中文）
@@ -109,16 +109,6 @@ sudo apt update && sudo apt install -y ffmpeg
    - **工作区插件（Workspace Plugin）**（仅限当前工作区）：
      ```bash
      git clone https://github.com/sylphlin/video-trimmer.git .agents/plugins/video-trimmer
-     ```
-
-2. **或安装为 Agent Skill**：
-   - **全局技能（Global Skill）**：
-     ```bash
-     git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/skills/video-trimmer
-     ```
-   - **工作区技能（Workspace Skill）**：
-     ```bash
-     git clone https://github.com/sylphlin/video-trimmer.git .agent/skills/video-trimmer
      ```
 
 #### 方法 B：独立 Python CLI 安装

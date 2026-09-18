@@ -47,9 +47,9 @@ video-trimmer/
 ├── rules/
 │   └── AGENTS.md               # 外部 AI クライアント実行時インバリアント（厳格な読み取り専用・フェイルファスト）
 ├── skills/
-│   └── video-trimmer/          # プラグインスキルバンドル（SKILL.md、scripts、prompts）
+│   └── video-trimmer/
+│       └── SKILL.md            # Agent Skill 仕様定義マニュアル
 ├── AGENTS.md                   # プロジェクト保守・開発運用規範（ASD-STE100 英語基準）
-├── SKILL.md                    # Agent Skill 仕様定義マニュアル
 ├── README.md                   # 公開ドキュメント（英語）
 ├── README.zh-TW.md             # 公開ドキュメント（繁体字中国語）
 ├── README.zh-CN.md             # 公開ドキュメント（簡体字中国語）
@@ -109,16 +109,6 @@ Google Antigravity または [Agent Plugins 1.0](https://agent-plugins.org/) 準
    - **ワークスペースプラグイン（Workspace Plugin）**（現在のワークスペース限定）：
      ```bash
      git clone https://github.com/sylphlin/video-trimmer.git .agents/plugins/video-trimmer
-     ```
-
-2. **または Agent Skill としてインストール**：
-   - **グローバルスキル（Global Skill）**：
-     ```bash
-     git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/skills/video-trimmer
-     ```
-   - **ワークスペーススキル（Workspace Skill）**：
-     ```bash
-     git clone https://github.com/sylphlin/video-trimmer.git .agent/skills/video-trimmer
      ```
 
 #### 方法 B: スタンドアロン Python CLI インストール
