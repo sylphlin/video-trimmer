@@ -26,6 +26,8 @@ video-trimmer/
 ├── plugin.json                       # Agent Plugins 1.0 specification manifest
 ├── rules/
 │   └── AGENTS.md                     # Strict read-only & fail-fast operational invariants for AI clients
+├── skills/
+│   └── video-trimmer/                # Plugin skill bundle (SKILL.md, scripts, prompts)
 ├── AGENTS.md                         # Permanent project invariants & developer rules (ASD-STE100 English)
 ├── SKILL.md                          # Skill definition and agent reference manual
 ├── README.md                         # Public GitHub README documentation
@@ -147,8 +149,7 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 | `--suffix` | | `None` | Custom tag suffix for generated filenames. |
 | `--crf` | | `18` | FFmpeg H.264 rendering CRF parameter (18 = visually lossless). |
 | `--skip-whisper`| | `False` | Skip local Whisper transcription (use pure energy fallback). |
-| `--no-voiceprint`| | `False` | Disable sherpa-onnx offline speaker diarization & voiceprint lock. |
-| `--cast-threshold`| | `0.05` | Minimum speech duration ratio (default 5%) to qualify as target cast. |
+| `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
 
 ---
 

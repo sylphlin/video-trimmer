@@ -46,6 +46,8 @@ video-trimmer/
 ├── plugin.json                 # Agent Plugins 1.0 仕様マニフェスト
 ├── rules/
 │   └── AGENTS.md               # 外部 AI クライアント実行時インバリアント（厳格な読み取り専用・フェイルファスト）
+├── skills/
+│   └── video-trimmer/          # プラグインスキルバンドル（SKILL.md、scripts、prompts）
 ├── AGENTS.md                   # プロジェクト保守・開発運用規範（ASD-STE100 英語基準）
 ├── SKILL.md                    # Agent Skill 仕様定義マニュアル
 ├── README.md                   # 公開ドキュメント（英語）

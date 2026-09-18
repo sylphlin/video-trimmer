@@ -46,6 +46,8 @@ video-trimmer/
 ├── plugin.json                 # Agent Plugins 1.0 规范清单
 ├── rules/
 │   └── AGENTS.md               # 外部 AI Client 运行期守则（严格只读与 Fail-Fast 防护）
+├── skills/
+│   └── video-trimmer/          # 插件技能组合包（SKILL.md、scripts、prompts）
 ├── AGENTS.md                   # 项目长期维护与开发守则（ASD-STE100 英文标准）
 ├── SKILL.md                    # Agent Skill 规范文件与执行指引
 ├── README.md                   # 公开说明文件（英文）

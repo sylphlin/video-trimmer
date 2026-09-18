@@ -46,6 +46,8 @@ video-trimmer/
 ├── plugin.json                 # Agent Plugins 1.0 규격 매니페스트
 ├── rules/
 │   └── AGENTS.md               # 외부 AI 클라이언트 실행 불변 규칙 (엄격한 읽기 전용 및 Fail-Fast)
+├── skills/
+│   └── video-trimmer/          # 플러그인 스킬 번들 (SKILL.md, scripts, prompts)
 ├── AGENTS.md                   # 프로젝트 유지보수 및 개발 운영 지침 (ASD-STE100 영어 기준)
 ├── SKILL.md                    # Agent Skill 규격 정의서 및 가이드
 ├── README.md                   # 공개 문서 (영어)

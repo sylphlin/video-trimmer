@@ -46,6 +46,8 @@ video-trimmer/
 ├── plugin.json                 # Agent Plugins 1.0 specification manifest
 ├── rules/
 │   └── AGENTS.md               # Strict read-only & fail-fast operational invariants for AI clients
+├── skills/
+│   └── video-trimmer/          # Plugin skill bundle (SKILL.md, scripts, prompts)
 ├── AGENTS.md                   # Permanent project invariants & developer rules (ASD-STE100 English)
 ├── SKILL.md                    # Standard Agent Skill specification & agent manual
 ├── README.md                   # Public GitHub documentation
