@@ -45,6 +45,7 @@ video-trimmer/
 ├── README.md                 # Public GitHub documentation
 ├── LICENSE                   # MIT License
 ├── .env.example              # Environment variables template for Vertex AI & GCS
+├── setup.sh                  # 100% Native gcloud GCP provisioning script (Zero Terraform)
 ├── pyproject.toml            # Modern PEP 621 Python packaging & console scripts
 ├── requirements.txt          # Python dependencies
 ├── video_trimmer.py          # Primary CLI entrypoint forwarder
@@ -100,27 +101,90 @@ pip install mlx-whisper
 pip install -e .
 ```
 
-### 3. Authentication & Configuration (Vertex AI + ADC)
+### 3. Google Cloud Native Setup (100% Native gcloud, Zero Terraform)
 
-This project exclusively uses **Google Cloud Vertex AI** with **Application Default Credentials (ADC)** and **Google Cloud Storage (GCS)** for video staging:
+This project exclusively uses **Google Cloud Vertex AI** with **Application Default Credentials (ADC)** and **Google Cloud Storage (GCS)** for video staging.
 
-1. **Authenticate once with Google Cloud**:
-   ```bash
-   gcloud auth application-default login
-   ```
+All cloud resources (GCS bucket, CORS, 2-day ephemeral auto-cleanup, dedicated Service Account, and least-privilege IAM bindings) are provisioned natively using `gcloud`—**zero external tool or Terraform dependencies, 100% Cloud Shell ready**.
 
-2. **Configure your environment**:
-   Copy `.env.example` to `.env` (or configure `~/.gemini/.env`):
-   ```bash
-   cp .env.example .env
-   ```
-   Set your Google Cloud project and staging bucket:
-   ```bash
-   GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-   GOOGLE_CLOUD_LOCATION=global
-   VIDEO_TRIMMER_BUCKET=your-gcs-bucket-name
-   MODEL_NAME=gemini-3.8-flash
-   ```
+#### Option A: One-Click Automated Setup (Recommended)
+
+Run the included automated provisioning script:
+
+```bash
+# Make script executable (first time only)
+chmod +x setup.sh
+
+# Automatic setup (reads existing gcloud project and configures .env):
+./setup.sh
+
+# Or explicitly specify project and region:
+./setup.sh --project YOUR_PROJECT_ID --region us-central1
+
+# Dry-run preview:
+./setup.sh --dry-run
+```
+
+The script automatically:
+1. Provisions/verifies GCS bucket `gs://video-preprocessing-${PROJECT_ID}` with `--uniform-bucket-level-access` and `--public-access-prevention`.
+2. Configures CORS (24-hour cache, `GET`/`HEAD`) for signed URL video playback.
+3. Configures Lifecycle Rules on `raw/` for **2-day ephemeral auto-cleanup**, preventing cloud storage clutter.
+4. Creates dedicated service account `video-trimmer-sa` with least-privilege permissions (`roles/storage.objectUser`, `roles/aiplatform.user`, `roles/logging.logWriter`).
+5. Configures your local `.env` file automatically.
+
+#### Option B: Manual Setup via Native gcloud Commands
+
+If you prefer configuring resources manually in your shell:
+
+```bash
+export PROJECT_ID="your-gcp-project-id"
+export REGION="us-central1"
+export BUCKET_NAME="video-preprocessing-${PROJECT_ID}"
+export SA="video-trimmer-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# 1. Create GCS Staging Bucket
+gcloud storage buckets create "gs://${BUCKET_NAME}" \
+    --project="${PROJECT_ID}" \
+    --location="${REGION}" \
+    --uniform-bucket-level-access \
+    --public-access-prevention
+
+# 2. Configure 2-Day Ephemeral Auto-Cleanup for Staged Video
+cat << 'EOF' > /tmp/lifecycle.json
+{
+  "rule": [
+    {
+      "action": {"type": "Delete"},
+      "condition": {
+        "age": 2,
+        "matchesPrefix": ["raw/"]
+      }
+    }
+  ]
+}
+EOF
+gcloud storage buckets update "gs://${BUCKET_NAME}" --lifecycle-file=/tmp/lifecycle.json
+
+# 3. Create Service Account & Grant Least-Privilege IAM Roles
+gcloud iam service-accounts create video-trimmer-sa \
+    --display-name="Video Trimmer Service Account" \
+    --project="${PROJECT_ID}"
+
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${SA}" \
+    --role="roles/aiplatform.user"
+
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+    --member="serviceAccount:${SA}" \
+    --role="roles/storage.objectUser"
+
+# 4. Authenticate locally with Application Default Credentials (ADC)
+gcloud auth application-default login
+
+# 5. Configure local .env
+cp .env.example .env
+# Set GOOGLE_CLOUD_PROJECT, VIDEO_TRIMMER_BUCKET, etc. in .env
+```
 
 ---
 

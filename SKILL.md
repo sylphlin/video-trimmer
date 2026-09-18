@@ -27,6 +27,7 @@ video-trimmer/
 ├── README.md                         # Public GitHub README documentation
 ├── LICENSE                           # MIT License
 ├── .env.example                      # Environment variables template for Vertex AI & GCS
+├── setup.sh                          # 100% Native gcloud GCP provisioning script (Zero Terraform)
 ├── pyproject.toml                    # Standard Python packaging & CLI console scripts
 ├── requirements.txt                  # Python runtime dependencies
 ├── video_trimmer.py                  # Primary CLI entrypoint forwarder
@@ -87,15 +88,17 @@ video-trimmer/
 
 When Antigravity, Claude Code, Cursor, or any compatible agent is instructed by the user to rough-cut or trim a raw video, follow this protocol:
 
-### Step 1: Environment Verification
-Ensure FFmpeg is installed and Google Cloud Application Default Credentials (ADC) are configured:
+### Step 1: Environment Verification & GCP Native Setup
+Ensure FFmpeg is installed and Google Cloud resources are provisioned (100% native gcloud, zero Terraform):
 ```bash
+# 1. Verify FFmpeg
 ffmpeg -version
+
+# 2. Authenticate once with Google Cloud ADC
 gcloud auth application-default login
 
-# Configure project & GCS bucket in .env (or ~/.gemini/.env)
-# GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-# VIDEO_TRIMMER_BUCKET=your-gcs-bucket
+# 3. One-click automated GCP provisioning (Creates bucket with 2-day auto-cleanup, SA, and .env):
+./setup.sh
 ```
 
 ### Step 2: Execute Primary Video Trimmer Pipeline
