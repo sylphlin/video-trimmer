@@ -12,10 +12,21 @@ from scripts.gcs_utils import (
     guess_mime_type,
     parse_gcs_uri,
     upload_file_to_gcs,
+    fix_mojibake_filename,
+    extract_filename_from_content_disposition,
 )
 
 
 class TestGCSUtils(unittest.TestCase):
+    def test_fix_mojibake_filename_and_content_disposition(self):
+        original = "sample_take_產品發表會錄影_1080p.mp4"
+        latin1_mojibake = original.encode("utf-8").decode("latin-1")
+        self.assertEqual(fix_mojibake_filename(latin1_mojibake), original)
+        self.assertEqual(
+            extract_filename_from_content_disposition(f'attachment; filename="{latin1_mojibake}"', "fallback.mp4"),
+            original,
+        )
+
     def test_guess_mime_type(self):
         self.assertEqual(guess_mime_type("video.mp4"), "video/mp4")
         self.assertEqual(guess_mime_type(Path("video.MOV")), "video/quicktime")

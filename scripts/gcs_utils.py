@@ -266,12 +266,62 @@ def get_gdrive_file_metadata(url_or_id: str, project_id: str = None, session=Non
     resp = sess.get(api_url, params=params, timeout=30)
     if resp.status_code in (401, 403):
         raise RuntimeError(
-            f"Google Drive API 權限錯誤 ({resp.status_code}): {resp.text}\n"
-            f"請執行以下指令授權 ADC 讀取 Google Drive:\n"
+            f"Google Drive API Permission Error ({resp.status_code}): {resp.text}\n"
+            f"Run the following command to authorize ADC for Google Drive:\n"
             f"  gcloud auth application-default login --scopes=\"https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly\""
         )
     resp.raise_for_status()
     return resp.json()
+
+
+def fix_mojibake_filename(name: str) -> str:
+    """
+    Recover UTF-8 filenames that were decoded as ISO-8859-1 (latin-1) by HTTP headers.
+    Leaves valid UTF-8 and ASCII filenames untouched.
+    """
+    if not name:
+        return ""
+    s = str(name)
+    if any(0x80 <= ord(c) <= 0xFF for c in s) and all(ord(c) <= 0xFF for c in s):
+        try:
+            return s.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+
+    def _decode_run(m: "re.Match[str]") -> str:
+        chunk = m.group(0)
+        try:
+            return chunk.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return chunk
+
+    if any(0x80 <= ord(c) <= 0xFF for c in s):
+        s = re.sub(r"[\x80-\xff]{2,}", _decode_run, s)
+    return s
+
+
+def extract_filename_from_content_disposition(cd: str, fallback_name: str) -> str:
+    """
+    Extract and decode filename from an HTTP Content-Disposition header.
+    Handles RFC 5987 filename*=UTF-8''... (case-insensitive) and ISO-8859-1 mojibake
+    inside filename="..." headers.
+    """
+    from urllib.parse import unquote
+    if not cd:
+        return fix_mojibake_filename(fallback_name)
+    m_utf8 = re.search(r"filename\*\s*=\s*(?:UTF-8|utf-8)''([^;\r\n]+)", cd, re.IGNORECASE)
+    if m_utf8:
+        raw_val = m_utf8.group(1).strip().strip("\"'")
+        return fix_mojibake_filename(unquote(raw_val, encoding="utf-8", errors="replace"))
+    m_quoted = re.search(r'filename\s*=\s*"([^"]+)"', cd, re.IGNORECASE)
+    if m_quoted:
+        raw_val = m_quoted.group(1).strip()
+        return fix_mojibake_filename(unquote(raw_val, encoding="utf-8", errors="replace"))
+    m_plain = re.search(r'filename\s*=\s*([^;\r\n]+)', cd, re.IGNORECASE)
+    if m_plain:
+        raw_val = m_plain.group(1).strip().strip("\"'")
+        return fix_mojibake_filename(unquote(raw_val, encoding="utf-8", errors="replace"))
+    return fix_mojibake_filename(fallback_name)
 
 
 def download_gdrive_file_with_cache(
@@ -289,21 +339,18 @@ def download_gdrive_file_with_cache(
     sess = get_gdrive_session(project_id=project_id)
     try:
         meta = get_gdrive_file_metadata(url_or_id, project_id=project_id, session=sess)
-        filename = meta.get("name") or f"gdrive_{file_id}.mp4"
+        filename = fix_mojibake_filename(meta.get("name") or f"gdrive_{file_id}.mp4")
         remote_md5 = meta.get("md5Checksum")
         remote_size = int(meta.get("size", 0) or 0)
     except Exception:
         import requests
-        from urllib.parse import unquote
         dest_dir = Path(target_dir or (Path.cwd() / "gdrive_inputs")).resolve()
         dest_dir.mkdir(parents=True, exist_ok=True)
         dl_url = "https://drive.usercontent.google.com/download"
         with requests.get(dl_url, params={"id": file_id, "export": "download", "confirm": "t"}, stream=True, timeout=600) as r:
             r.raise_for_status()
             cd = r.headers.get("Content-Disposition", "")
-            m_utf8 = re.search(r"filename\*=UTF-8''([^;]+)", cd)
-            m_ascii = re.search(r'filename="([^"]+)"', cd)
-            detected_name = unquote((m_utf8.group(1) if m_utf8 else (m_ascii.group(1) if m_ascii else f"gdrive_{file_id}.mp4")).strip())
+            detected_name = extract_filename_from_content_disposition(cd, f"gdrive_{file_id}.mp4")
             local_path = dest_dir / detected_name
             tmp_path = local_path.with_suffix(local_path.suffix + ".part")
             with open(tmp_path, "wb") as f:
