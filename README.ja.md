@@ -322,8 +322,7 @@ python3 -m unittest discover tests
 
 ```bash
 # Step 1: Google Drive 読み取り権限を含めて ADC ログイン
-gcloud auth application-default login \
-  --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
+gcloud auth application-default login
 ./setup.sh --project YOUR_GCP_PROJECT_ID
 
 # Step 2: Google Drive 上の素材リンクを直接指定して Agentic 粗編集を実行

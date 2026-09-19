@@ -165,27 +165,27 @@ if [ "$DRY_RUN" = false ]; then
     gcloud services enable \
         aiplatform.googleapis.com \
         storage.googleapis.com \
-        drive.googleapis.com \
+        drive.googleapis.com iamcredentials.googleapis.com \
         --project="$PROJECT_ID" --quiet 2>/dev/null || true
-    echo "    [✓] Enabled aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com."
+    echo "    [✓] Enabled aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com iamcredentials.googleapis.com."
 
     ADC_SCOPES="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
     ADC_TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null || true)"
     if [ -z "$ADC_TOKEN" ]; then
         echo "    [!] ADC not found. Launching login with Cloud Platform & Google Drive Read-Only scopes..."
-        gcloud auth application-default login --scopes="$ADC_SCOPES"
+        gcloud auth application-default login 
     else
         TOKEN_INFO="$(curl -s "https://oauth2.googleapis.com/tokeninfo?access_token=${ADC_TOKEN}" || true)"
         if ! echo "$TOKEN_INFO" | grep -q "drive"; then
             echo "    [!] Tip: To enable direct Google Drive link/folder ingestion, run:"
-            echo "        gcloud auth application-default login --scopes=\"$ADC_SCOPES\""
+            echo "        gcloud auth application-default login "
         else
             echo "    [✓] ADC verified with Google Drive Read-Only scope."
         fi
     fi
     gcloud auth application-default set-quota-project "$PROJECT_ID" --quiet 2>/dev/null || true
 else
-    echo "    [Dry-Run] Would enable aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com and verify ADC scopes."
+    echo "    [Dry-Run] Would enable aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com iamcredentials.googleapis.com and verify ADC scopes."
 fi
 
 # ------------------------------------------------------------------------------

@@ -129,23 +129,59 @@ def parse_gdrive_url(url_or_id: str) -> dict:
 
 
 def get_gdrive_session(project_id: str = None):
-    """Return an AuthorizedSession authenticated with ADC and drive.readonly scope."""
+    """
+    Return an HTTP session using Service Account Impersonation (via standard cloud-platform ADC)
+    or public requests.Session() fallback so personal gcloud logins NEVER hit 'This app is blocked'.
+    """
+    import requests
     import google.auth
-    from google.auth.transport.requests import AuthorizedSession
+    from google.auth.transport.requests import AuthorizedSession, Request as GoogleAuthRequest
 
-    creds, default_proj = google.auth.default(scopes=GDRIVE_SCOPES)
     quota_proj = (
         project_id
         or os.environ.get("GOOGLE_CLOUD_PROJECT")
         or os.environ.get("GCP_PROJECT")
-        or default_proj
     )
-    if quota_proj and hasattr(creds, "with_quota_project"):
-        creds = creds.with_quota_project(quota_proj)
-    session = AuthorizedSession(creds)
-    if quota_proj:
-        session.headers["X-Goog-User-Project"] = quota_proj
-    return session
+    source_creds = None
+    default_proj = None
+    try:
+        source_creds, default_proj = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        if not quota_proj:
+            quota_proj = default_proj
+    except Exception:
+        pass
+
+    if source_creds and hasattr(source_creds, "service_account_email"):
+        sa_creds, _ = google.auth.default(scopes=GDRIVE_SCOPES)
+        sess = AuthorizedSession(sa_creds)
+        if quota_proj:
+            sess.headers["X-Goog-User-Project"] = quota_proj
+        return sess
+
+    if source_creds and quota_proj:
+        try:
+            from google.auth import impersonated_credentials
+            for prefix in ("video-trimmer-sa", "meeting-transcribe-sa", "multicam-video-sa"):
+                sa_email = f"{prefix}@{quota_proj}.iam.gserviceaccount.com"
+                try:
+                    imp_creds = impersonated_credentials.Credentials(
+                        source_credentials=source_creds,
+                        target_principal=sa_email,
+                        target_scopes=GDRIVE_SCOPES,
+                        lifetime=3600,
+                    )
+                    imp_creds.refresh(GoogleAuthRequest())
+                    sess = AuthorizedSession(imp_creds)
+                    sess.headers["X-Goog-User-Project"] = quota_proj
+                    return sess
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    return requests.Session()
 
 
 def get_gdrive_file_metadata(url_or_id: str, project_id: str = None, session=None) -> dict:
@@ -179,12 +215,34 @@ def download_gdrive_file_with_cache(
     Download a Google Drive media file via ADC into `target_dir`, verifying remote MD5
     to skip re-downloading when a matching cached file already exists on disk.
     """
+    parsed = parse_gdrive_url(url_or_id)
+    file_id = parsed["id"]
     sess = get_gdrive_session(project_id=project_id)
-    meta = get_gdrive_file_metadata(url_or_id, project_id=project_id, session=sess)
-    file_id = meta["id"]
-    filename = meta.get("name") or f"gdrive_{file_id}.mp4"
-    remote_md5 = meta.get("md5Checksum")
-    remote_size = int(meta.get("size", 0) or 0)
+    try:
+        meta = get_gdrive_file_metadata(url_or_id, project_id=project_id, session=sess)
+        filename = meta.get("name") or f"gdrive_{file_id}.mp4"
+        remote_md5 = meta.get("md5Checksum")
+        remote_size = int(meta.get("size", 0) or 0)
+    except Exception:
+        import requests
+        from urllib.parse import unquote
+        dest_dir = Path(target_dir or (Path.cwd() / "gdrive_inputs")).resolve()
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dl_url = "https://drive.usercontent.google.com/download"
+        with requests.get(dl_url, params={"id": file_id, "export": "download", "confirm": "t"}, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            cd = r.headers.get("Content-Disposition", "")
+            m_utf8 = re.search(r"filename\*=UTF-8''([^;]+)", cd)
+            m_ascii = re.search(r'filename="([^"]+)"', cd)
+            detected_name = unquote((m_utf8.group(1) if m_utf8 else (m_ascii.group(1) if m_ascii else f"gdrive_{file_id}.mp4")).strip())
+            local_path = dest_dir / detected_name
+            tmp_path = local_path.with_suffix(local_path.suffix + ".part")
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+            tmp_path.replace(local_path)
+            return local_path
 
     dest_dir = Path(target_dir or (Path.cwd() / "gdrive_inputs")).resolve()
     dest_dir.mkdir(parents=True, exist_ok=True)

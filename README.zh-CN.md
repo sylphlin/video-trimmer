@@ -304,8 +304,7 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 
 ### 1. 一键启用云端环境与 Google Drive 权限 (`./setup.sh`)
 ```bash
-gcloud auth application-default login \
-  --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
+gcloud auth application-default login
 ./setup.sh --project YOUR_GCP_PROJECT_ID
 ```
 
