@@ -1,12 +1,7 @@
 # Video Trimmer (`video-trimmer`)
 
-> **AI 驱动的智能视频粗剪与修剪引擎**
-> 
-> 专为口播视频（Talking-head videos）、音视频播客、教程讲解与公开演讲打造的端到端智能视频粗剪工具。
-> 结合 **Gemini 3.8 Flash 多模态原生视频理解**、**Whisper 词级声学时间戳对齐**（支持 Apple Silicon Metal GPU 硬件加速 `mlx-whisper`）与 **声学起振自动吸附（Acoustic Onset Snapping / Smart Gap Shortening）**。
-
 [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/sylphlin/video-trimmer/blob/main/LICENSE)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-brightgreen.svg)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-brightgreen.svg)](https://www.python.org/)
 [![Apple Silicon Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-orange.svg)]()
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-5.0+-red.svg)](https://ffmpeg.org/)
 
@@ -14,333 +9,67 @@
 
 ---
 
-## 核心特色与技术创新
+## 项目概览 (Overview)
 
-1. **原生多模态视频理解（Gemini 3.8 Flash）**：
-   - 不单纯依赖脆弱的语音文字转录（ASR）比对。
-   - 通过 Gemini Files API / Interactions API 直传原始视频，同步评估**讲者眼神注视、面部表情、卡壳卡顿与重录片段**。
-2. **智能“最终录制优先（Last Take Wins）”算法**：
-   - 自动识别讲者口误、忘词、语气练习或同段落重复录制，精准保留最后一次流畅成功的录制（Take）。
-3. **多模态动态讲者分离（Multimodal Active Speaker Diarization）**：
-   - 同步解析镜头视觉线索（眼神注视、唇形同步、肢体语言）与音频声学特征（胸前领夹麦克风 vs 远处空间残响）。
-   - 准确区分画面主角讲者与场外工作人员喊话（例如“Action”、“CTA-S2”、“CDA84”）或镜头外的幕后花絮闲聊，无需依赖繁重的本地语者分离模型即可达成角色分离。
-4. **声学起振自动吸附（Acoustic Onset Snapping / Smart Gap Shortening）**：
-   - Whisper 转录时间戳往往比说话者真正发声早 0.3 秒至 0.8 秒。`video-trimmer` 动态扫描波形能量，将剪切起点精确吸附在**声带起振前 80ms**，消除说话前尴尬的多余停顿。
-5. **自适应环境底噪与尾音追踪**：
-   - 动态分析局部空间底噪，保护轻柔鼻音尾音（例如日语“〜ございます”、发音弱化字尾）不被截断。
-6. **15ms 音频等功率微淡入淡出（Audio Equal-Power Micro-Crossfade）**：
-   - FFmpeg 渲染输出时，在每个剪辑接点自动应用 15ms 微淡入淡出（`afade`），彻底消除数字爆音（Click/Pop）与底噪阶梯断差。
-7. **脚本引导对齐（`--script`）**：
-   - 可选传入拍摄脚本或逐字稿，引导分段对齐，避免遗漏关键脚本内容。
-8. **一键导出主流 NLE 剪辑工程**：
-   - 生成业界标准 **FCP 7 XML**（兼容 Adobe Premiere Pro 与 DaVinci Resolve）与 **FCPXML**（Final Cut Pro X），并可直接渲染输出高质量 **MP4**。
+**Video Trimmer** 是面向口播视频、教程与演讲录像的 AI 自动粗剪引擎。系统结合 **Google Vertex AI Gemini 3.8 Flash** 多模态视频推理、**Whisper 逐字声学时间戳**（`mlx-whisper`）与 **声学起音锁定（Acoustic Onset Snapping）**。每次运行会自动剔除 NG 重录、口误与静音停顿，并导出专业 NLE 时间线（`.xml`, `.fcpxml`, `.edl`, `.csv`）及渲染完成的 MP4 视频。
 
 ---
 
-## 项目结构
+## 核心技术能力
 
-本项目完全符合 [Agent Plugins 1.0 Specification](https://agent-plugins.org/) 与 [Agent Skills Specification](https://agentskills.io/specification)：
-
-```text
-video-trimmer/
-├── plugin.json                 # Agent Plugins 1.0 规范清单
-├── rules/
-│   └── AGENTS.md               # 外部 AI Client 运行期守则（严格只读与 Fail-Fast 防护）
-├── skills/
-│   └── video-trimmer/
-│       └── SKILL.md            # Agent Skill 规范文件与执行指引
-├── AGENTS.md                   # 项目长期维护与开发守则（ASD-STE100 英文标准）
-├── README.md                   # 公开说明文件（英文）
-├── README.zh-TW.md             # 公开说明文件（繁体中文）
-├── README.zh-CN.md             # 公开说明文件（简体中文）
-├── README.ja.md                # 公开说明文件（日文）
-├── README.ko.md                # 公开说明文件（韩文）
-├── LICENSE                     # MIT 开源许可证
-├── .env.example                # Vertex AI 与 GCS 环境变量模板
-├── setup.sh                    # 100% Native gcloud GCP 资源配置脚本（零 Terraform 依赖）
-├── pyproject.toml              # PEP 621 Python 打包与 CLI 命令配置
-├── requirements.txt            # Python 运行环境依赖
-├── video_trimmer.py            # 主 CLI 命令转发器
-├── auto_rough_cut.py           # 向后兼容包装器
-├── scripts/                    # 核心引擎模块
-│   ├── __init__.py
-│   ├── video_trimmer.py        # CLI 参数解析与主要管线编排
-│   ├── constants.py            # 集中管理的命名常量
-│   ├── exceptions.py           # 自定义异常层级架构
-│   ├── acoustic.py             # CPS、动态保护边距、声学能量检测
-│   ├── transcribe.py           # Whisper 语音转录、语义句合并、剪辑区间对齐
-│   ├── gemini_client.py        # Vertex AI (ADC) 客户端与多模态推理
-│   ├── gcs_utils.py            # GCS 临时上传与临时文件清理
-│   ├── exporters.py            # FCP7 XML / FCPXML / CSV 导出器
-│   └── render.py               # ffprobe 规格检验与 ffmpeg 渲染输出
-├── tests/                      # 离线单元测试套件
-├── prompts/
-│   └── video_cut_prompt.md     # 多模态剪辑 Prompt 规范
-└── examples/                   # 示例工程输出（EDL、XML、FCPXML、JSON）
-```
+1. **多模态原生视频推理 (`gemini-3.8-flash`)**：同步评估讲者眼神、面部表情、卡顿与重录段落。
+2. **Last-Take-Wins（保留最后成功重录）**：自动识别同一段落的多次尝试，仅保留最后一次完整成功的镜头。
+3. **多模态主讲人分离**：结合画面口型与麦克风距离，区分出镜主讲人与场外导演口令。
+4. **声学起音锁定 (`tighten_clip_to_speech`)**：将剪辑入点锁定在声带振动前 80 ms，消除冗长前导空白且不截断字首音素。
+5. **15 ms 等功率音频微交叉淡化**：在每个剪辑边界注入 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 与 `afade=t=out:d=0.015:curve=oqsin`），消除音频跳接爆音。
+6. **多平台 NLE 时间线互通**：导出 **FCP7 XML**（Premiere Pro / DaVinci Resolve）、**FCPXML**（Final Cut Pro）、**CMX 3600 EDL** 与 **CSV**。
 
 ---
 
-## 快速开始
-
-### 1. 系统环境要求
-
-请确保系统已安装 [FFmpeg](https://ffmpeg.org/) 并已配置于 `PATH`：
+## 安装与 Google Cloud 环境配置
 
 ```bash
-# macOS (Homebrew)
+# 1. 安装 FFmpeg 与 Python 依赖
 brew install ffmpeg
-
-# Ubuntu / Debian
-sudo apt update && sudo apt install -y ffmpeg
-```
-
-### 2. 安装与部署
-
-#### 方法 A：Google Antigravity 与 Agent Plugins 1.0 安装（AI Agent 推荐方式）
-
-可直接安装至 Google Antigravity 或任何支持 [Agent Plugins 1.0](https://agent-plugins.org/) 规范的 AI Client：
-
-1. **安装为 Agent Plugin（推荐：自动加载 `plugin.json` 与 `rules/AGENTS.md` 只读保护）**：
-   - **全局插件（Global Plugin）**（所有项目与工作区通用）：
-     ```bash
-     git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
-     ```
-   - **工作区插件（Workspace Plugin）**（仅限当前工作区）：
-     ```bash
-     git clone https://github.com/sylphlin/video-trimmer.git .agents/plugins/video-trimmer
-     ```
-
-#### 方法 B：独立 Python CLI 安装
-
-克隆仓库并在本地安装依赖：
-
-```bash
-git clone https://github.com/sylphlin/video-trimmer.git
-cd video-trimmer
-
-# 安装核心依赖
+git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
 pip install -r requirements.txt
-
-# （推荐 macOS Apple Silicon 用户）安装 mlx-whisper 以获得 Metal GPU 硬件加速
 pip install mlx-whisper
 
-# 或以可编辑模式安装 CLI 工具
-pip install -e .
-```
-
-### 3. Google Cloud 原生资源配置（100% Native gcloud，零 Terraform 依赖）
-
-本工具专用于 **Google Cloud Vertex AI** 配合 **应用程序默认凭据（ADC）** 以及 **Google Cloud Storage (GCS)** 进行多模态视频暂存。
-
-所有云端资源（GCS 存储桶、CORS 设置、2 天临时文件自动清理生命周期、专属 Service Account 与最小权限 IAM 角色）均直接通过原生 `gcloud` 命令配置——**无任何外部 Terraform 依赖，100% Cloud Shell Ready**。
-
-#### 选项 A：一键自动化配置（推荐）
-
-直接执行随附的自动化配置脚本：
-
-```bash
-# 赋予执行权限（仅需执行一次）
+# 2. 授权 ADC 并运行 setup.sh
+gcloud auth application-default login
 chmod +x setup.sh
-
-# 自动化配置（自动读取现有 gcloud 项目并配置 .env）：
-./setup.sh
-
-# 或显式指定 GCP 项目与区域：
-./setup.sh --project 你的项目ID --region us-central1
-
-# 干跑预览（不修改任何云端资源）：
-./setup.sh --dry-run
+./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
 ```
 
-该脚本将自动完成：
-1. 创建并验证 GCS 存储桶 `gs://video-preprocessing-${PROJECT_ID}`，启用 `--uniform-bucket-level-access` 与 `--public-access-prevention`。
-2. 配置 24 小时缓存的 CORS 规则（支持 `GET` 与 `HEAD`），便于 Signed URL 视频流式传输。
-3. 为暂存目录 `raw/` 配置 **2 天自动清理生命周期规则**，避免云端存储累积费用。
-4. 创建专属 Service Account `video-trimmer-sa` 并授予最小权限（`roles/storage.objectUser`、`roles/aiplatform.user`、`roles/logging.logWriter`）。
-5. 自动写入本地 `.env` 配置文件。
+---
 
-#### 选项 B：手动原生 gcloud 配置
-
-若偏好在终端中手动执行原生命令：
+## 命令行使用说明 (CLI Usage)
 
 ```bash
-export PROJECT_ID="你的GCP项目ID"
-export REGION="us-central1"
-export BUCKET_NAME="video-preprocessing-${PROJECT_ID}"
-export SA="video-trimmer-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+# 基础视频粗剪
+python3 video_trimmer.py -i "raw_footage.mp4"
 
-# 1. 创建 GCS 暂存存储桶
-gcloud storage buckets create "gs://${BUCKET_NAME}" \
-    --project="${PROJECT_ID}" \
-    --location="${REGION}" \
-    --uniform-bucket-level-access \
-    --public-access-prevention
+# 配合拍摄脚本对齐
+python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
 
-# 2. 配置暂存视频 2 天自动清理规则
-cat << 'EOF' > /tmp/lifecycle.json
-{
-  "rule": [
-    {
-      "action": {"type": "Delete"},
-      "condition": {
-        "age": 2,
-        "matchesPrefix": ["raw/"]
-      }
-    }
-  ]
-}
-EOF
-gcloud storage buckets update "gs://${BUCKET_NAME}" --lifecycle-file=/tmp/lifecycle.json
+# 启用 Agentic 视频理解模式
+python3 video_trimmer.py -i "raw_footage.mp4" --agentic
 
-# 3. 创建专属 Service Account 并绑定最小权限 IAM 角色
-gcloud iam service-accounts create video-trimmer-sa \
-    --display-name="Video Trimmer Service Account" \
-    --project="${PROJECT_ID}"
-
-gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${SA}" \
-    --role="roles/aiplatform.user"
-
-gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
-    --member="serviceAccount:${SA}" \
-    --role="roles/storage.objectUser"
-
-# 4. 在本地进行 ADC 凭据登录验证
-gcloud auth application-default login
-
-# 5. 配置本地 .env
-cp .env.example .env
-# 在 .env 中填写 GOOGLE_CLOUD_PROJECT、VIDEO_TRIMMER_BUCKET 等参数
+# 直接从 Google Drive 分享链接进行粗剪
+python3 video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" --agentic -o output/
 ```
 
 ---
 
-## 使用方法
+## Google Drive 直连与 GCS 双层生命周期规则
 
-对原始拍摄视频执行粗剪管线：
-
-```bash
-# 使用已安装的 CLI 命令：
-video-trimmer -i "/路径/至/raw_footage.mp4"
-
-# 或直接使用 Python 执行：
-python video_trimmer.py -i "/路径/至/raw_footage.mp4"
-```
-
-### 进阶示例
-
-```bash
-# 1. 提供拍摄脚本以进行章节引导对齐
-video-trimmer -i "take 1.mp4" --script "script.md"
-
-# 2. 启用 Agentic 视频理解（动态多轮帧检索）
-video-trimmer -i "interview.mp4" --agentic
-
-# 3. 采用紧凑节奏模式（适合高节奏知识型 YouTube 讲解或科技评测）
-video-trimmer -i "news.mp4" --pacing compact --suffix "fast"
-
-# 4. 使用已缓存的 EDL JSON 重新渲染剪辑（本地秒级处理，无需重新调用云端 API）
-video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "fine_tuned"
-```
+| GCS 路径前缀 (`matchesPrefix`) | 存储对象 | 保留天数 (`age`) | 说明 |
+| :--- | :--- | :--- | :--- |
+| **`raw/`** | 暂存原始视频 (`raw/<filename>.mp4`) | **2 天 (`age: 2`)** | 推理后立即删除，并以 2 天自动清理规则作为安全兜底。 |
+| **`output/`**、**`deliverables/`**、**`trimmed/`** | 粗剪视频、XML/FCPXML 时间线与报告 | **15 天 (`age: 15`)** | 保留 15 天供团队审阅，到期自动清理。 |
 
 ---
 
-## CLI 命令行参数参考
+## 许可证 (License)
 
-| 参数 | 缩写 | 默认值 | 说明 |
-| :--- | :---: | :---: | :--- |
-| `--input` | `-i` | *(必需)* | 输入的原始视频文件路径（`.mp4`、`.mov`）。 |
-| `--output-dir` | `-o` | 视频同目录 | 保存所有输出文件的目录路径。 |
-| `--model` | `-m` | `gemini-3.8-flash` | Gemini 模型标识符（默认自 `$MODEL_NAME` 读取）。 |
-| `--project` | | `None` | Google Cloud 项目 ID（默认自 `$GOOGLE_CLOUD_PROJECT` 或 ADC 读取）。 |
-| `--region` | | `None` | Vertex AI 地理位置（默认自 `$GOOGLE_CLOUD_LOCATION` 或 `global` 读取）。 |
-| `--bucket` | | `None` | 用于视频暂存的 GCS 存储桶名称（默认自 `$VIDEO_TRIMMER_BUCKET` 读取）。 |
-| `--keep-gcs-upload` | | `False` | 保留 GCS 上的暂存视频，不于推理完成后立即删除。 |
-| `--script` | `-s` | `None` | 拍摄脚本或逐字稿文本文件路径（`.md` / `.txt`）。 |
-| `--agentic` | | `False` | 启用动态帧检索的多轮 Agentic 视频理解模式。 |
-| `--pacing` | `-p` | `auto` | 语音节奏保护策略：`auto`（动态 CPS）、`compact`（紧凑）、`breathing`（放宽呼吸停顿）。 |
-| `--cached-json`| | `None` | 传入现有 EDL JSON 文件以跳过云端 Gemini 推理，直接进行本地剪辑渲染。 |
-| `--suffix` | | `None` | 为输出的文件名称加入自定义后缀标签。 |
-| `--crf` | | `18` | FFmpeg H.264 渲染的 CRF 画质参数（18 为视觉无损）。 |
-| `--skip-whisper`| | `False` | 跳过本地 Whisper 转录（改用语音能量 Fallback 模式）。 |
-| `--verbose` | | `False` | 输出详细 DEBUG 层级日志（默认为 INFO）。 |
-
----
-
-## 输出文件说明
-
-针对输入视频 `take 1.mp4`，`video-trimmer` 将生成以下文件：
-
-1. **`take 1_<tag>_trimmed.mp4`**：已自动完成粗剪拼接、包含等功率音频微淡入淡出的最终渲染视频。
-2. **`take 1_<tag>_edl.xml`**：标准 FCP 7 XML 剪辑时间线，兼容 **Adobe Premiere Pro** 与 **DaVinci Resolve**。
-3. **`take 1_<tag>_edl.fcpxml`**：专用于 **Final Cut Pro X** 的 Apple FCPXML 剪辑时间线。
-4. **`take 1_<tag>_edl.json`**：包含保留语句、讲者语速 CPS、时间戳的结构化剪辑决策 JSON。
-5. **`take 1_<tag>_edl.csv`**：可用于表格查看的剪辑片段对照表，含视觉与声学验证备注。
-6. **`take 1_whisper_sentences.json`**：包含词级时间戳的完整语音转录分析记录。
-7. **`usage_log.jsonl`**（位于输出目录）：每次调用 Gemini API 的详细记录，追踪 Token 消耗量与调用耗时，便于用量统计。
-
----
-
-## 导入非线性编辑软件（NLE）
-
-- **DaVinci Resolve**：
-  1. 在媒体池（Media Pool）右键 ➜ `时间线` ➜ `导入` ➜ `AAF / EDL / XML...`（快捷键 `Ctrl+Shift+I` / `Cmd+Shift+I`）。
-  2. 选择生成的 `_edl.xml`，即可瞬间建立链接回原始视频的精准粗剪时间线。
-- **Adobe Premiere Pro**：
-  1. 依次点击菜单 `文件` ➜ `导入...`（快捷键 `Cmd+I` / `Ctrl+I`）。
-  2. 选择 `_edl.xml`，在项目面板中双击生成的序列即可直接编辑。
-- **Final Cut Pro X**：
-  1. 依次点击菜单 `文件` ➜ `导入` ➜ `XML...`。
-  2. 选择生成的 `_edl.fcpxml` 即可直接载入。
-
----
-
----
-
-## ☁️ Google Drive 云端硬盘直通与 GCS Lifecycle 自动清理规则 (ADC 零密钥直连)
-
-在实际制作流程中，摄影师常将单机 NG 毛片直接上传至 **Google Drive（个人云端硬盘或团队共享云端硬盘 Shared Drives）**。`video-trimmer` 支持通过 `gcloud` ADC（`drive.readonly` 权限）直接读取 Google Drive 分享链接，并搭配 GCS 双层智能缓存与自动清理：
-
-### 1. 一键启用云端环境与 Google Drive 权限 (`./setup.sh`)
-```bash
-gcloud auth application-default login
-./setup.sh --project YOUR_GCP_PROJECT_ID
-```
-
-### 2. 📌 Google Drive 支持情境与实战范例
-
-| 支持情境 | 输入参数格式 | 智能缓存与自动处理行为 |
-| :--- | :--- | :--- |
-| **情境 A：Google Drive 毛片直接粗剪** | `-i "https://drive.google.com/file/d/<FILE_ID>/view"` | 通过 Drive API v3 校验远程 `md5Checksum` 并缓存至 `<output_dir>/gdrive_inputs/`，自动转存至 GCS `raw/`（若远程 `sha256` / `gdrive_md5` 已匹配则秒级跳过上传）。 |
-| **情境 B：搭配讲稿进行选镜粗剪** | `-i "<Google Drive 视频链接>" -s script.md --agentic` | 自动比对讲稿与多次重录，保留最佳 Take 并导出 `.mp4`、`.xml` 与 `.fcpxml`。 |
-
-```bash
-# 直接粘贴 Google Drive 毛片链接执行 Agentic Video 智能粗剪：
-python3 video_trimmer.py \
-  -i "https://drive.google.com/file/d/1RawTakeVideoIdxxxxxx/view?usp=sharing" \
-  --agentic -o output/
-```
-
-### 3. 🗑️ GCS 存储桶双阶生命周期规则 (`raw/` 2天 / 产出物 15天)
-- **`raw/`**：保留 **2 天 (`age: 2`)**（供同日调校秒级命中 `sha256`/`gdrive_md5` 缓存，2 天后自动删除）。
-- **`output/`、`deliverables/`、`trimmed/`**：产出物保留 **15 天 (`age: 15`)** 供团队审阅下载。
-
----
-
-## 开发与测试
-
-运行离线单元测试（使用合成音频与固定测试夹具，无需连接真实视频或 API）：
-
-```bash
-pip install -e ".[dev]"
-pytest tests/
-# 或
-python3 -m unittest discover tests
-```
-
----
-
-## 许可证
-
-[MIT License](LICENSE) © 2026 sylphlin
+本项目采用 [MIT License](LICENSE) 授权。
