@@ -128,6 +128,66 @@ def parse_gdrive_url(url_or_id: str) -> dict:
     raise ValueError(f"無法解析 Google Drive 連結或 ID: {url_or_id}")
 
 
+def _load_gcloud_user_drive_credentials():
+    """
+    Attempt to load personal user Google Drive credentials (user@gmail.com) from
+    ~/.config/gcloud/legacy_credentials/<account>/adc.json (populated when user runs
+    `gcloud auth login --enable-gdrive-access`, which uses Google Cloud SDK's
+    whitelisted first-party CLOUDSDK_CLIENT_ID and never triggers 'This app is blocked').
+    Returns refreshed Credentials if valid for Drive access, or None otherwise.
+    """
+    import google.auth
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+
+    gcloud_dir = os.path.expanduser("~/.config/gcloud")
+    legacy_dir = os.path.join(gcloud_dir, "legacy_credentials")
+    if not os.path.isdir(legacy_dir):
+        return None
+
+    active_account = None
+    try:
+        active_cfg_name = "default"
+        active_cfg_file = os.path.join(gcloud_dir, "active_config")
+        if os.path.isfile(active_cfg_file):
+            with open(active_cfg_file, "r", encoding="utf-8") as f:
+                active_cfg_name = f.read().strip() or "default"
+        cfg_path = os.path.join(gcloud_dir, "configurations", f"config_{active_cfg_name}")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if "=" in line and line.strip().startswith("account"):
+                        active_account = line.split("=", 1)[1].strip()
+                        break
+    except Exception:
+        pass
+
+    candidate_accounts = []
+    if active_account:
+        candidate_accounts.append(active_account)
+    try:
+        for entry in sorted(os.listdir(legacy_dir)):
+            if entry not in candidate_accounts:
+                candidate_accounts.append(entry)
+    except Exception:
+        pass
+
+    drive_scopes = [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/cloud-platform",
+    ]
+    for acct in candidate_accounts:
+        adc_file = os.path.join(legacy_dir, acct, "adc.json")
+        if os.path.isfile(adc_file):
+            try:
+                creds, _ = google.auth.load_credentials_from_file(adc_file, scopes=drive_scopes)
+                creds.refresh(GoogleAuthRequest())
+                if creds.valid:
+                    return creds
+            except Exception:
+                continue
+    return None
+
+
 def get_gdrive_session(project_id: str = None):
     """
     Return an HTTP session using Service Account Impersonation (via standard cloud-platform ADC)
@@ -153,6 +213,15 @@ def get_gdrive_session(project_id: str = None):
     except Exception:
         pass
 
+    # Tier 1A: Personal Google Account credentials (`gcloud auth login --enable-gdrive-access`)
+    user_drive_creds = _load_gcloud_user_drive_credentials()
+    if user_drive_creds is not None:
+        sess = AuthorizedSession(user_drive_creds)
+        if quota_proj:
+            sess.headers["X-Goog-User-Project"] = quota_proj
+        return sess
+
+    # Tier 1B: Native Service Account credentials
     if source_creds and hasattr(source_creds, "service_account_email"):
         sa_creds, _ = google.auth.default(scopes=GDRIVE_SCOPES)
         sess = AuthorizedSession(sa_creds)

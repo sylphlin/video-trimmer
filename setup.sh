@@ -165,9 +165,9 @@ if [ "$DRY_RUN" = false ]; then
     gcloud services enable \
         aiplatform.googleapis.com \
         storage.googleapis.com \
-        drive.googleapis.com iamcredentials.googleapis.com \
+        drive.googleapis.com iam.googleapis.com iamcredentials.googleapis.com iamcredentials.googleapis.com \
         --project="$PROJECT_ID" --quiet 2>/dev/null || true
-    echo "    [✓] Enabled aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com iamcredentials.googleapis.com."
+    echo "    [✓] Enabled aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com iam.googleapis.com iamcredentials.googleapis.com iamcredentials.googleapis.com."
 
     ADC_SCOPES="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
     ADC_TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null || true)"
@@ -185,7 +185,7 @@ if [ "$DRY_RUN" = false ]; then
     fi
     gcloud auth application-default set-quota-project "$PROJECT_ID" --quiet 2>/dev/null || true
 else
-    echo "    [Dry-Run] Would enable aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com iamcredentials.googleapis.com and verify ADC scopes."
+    echo "    [Dry-Run] Would enable aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com iam.googleapis.com iamcredentials.googleapis.com iamcredentials.googleapis.com and verify ADC scopes."
 fi
 
 # ------------------------------------------------------------------------------
