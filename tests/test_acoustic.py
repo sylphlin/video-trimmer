@@ -1,13 +1,8 @@
 """acoustic.py 的離線單元測試：以合成音訊驗證方向性與邊界正確性，不追求絕對數值精準。"""
 
+import unittest
 import numpy as np
-try:
-    import pytest
-except ImportError:
-    import tests
-    import pytest
-
-from scripts.acoustic import calculate_clip_cps, compute_dynamic_margins, refine_speech_bounds_locked
+from scripts.acoustic import calculate_clip_cps, refine_speech_bounds_locked
 
 SR = 16000
 
@@ -24,34 +19,7 @@ def _silence(duration, sr=SR, amplitude=0.0005):
     return (amplitude * rng.standard_normal(n)).astype(np.float64)
 
 
-class TestComputeDynamicMargins:
-    def test_margins_are_positive(self):
-        for cps in [1.0, 2.5, 3.0, 4.0, 5.5, 8.0]:
-            in_m, out_m = compute_dynamic_margins(cps)
-            assert in_m > 0
-            assert out_m > 0
-
-    def test_fast_pacing_has_tighter_margins_than_slow(self):
-        fast_in, fast_out = compute_dynamic_margins(8.0)
-        slow_in, slow_out = compute_dynamic_margins(2.0)
-        assert fast_in < slow_in
-        assert fast_out < slow_out
-
-    def test_compact_pacing_override(self):
-        assert compute_dynamic_margins(1.0, pacing="compact") == (0.06, 0.10)
-
-    def test_breathing_pacing_override(self):
-        assert compute_dynamic_margins(8.0, pacing="breathing") == (0.25, 0.35)
-
-    def test_interpolation_between_extremes(self):
-        in_m, out_m = compute_dynamic_margins(4.25)  # 3.0 與 5.5 的中點
-        fast_in, fast_out = compute_dynamic_margins(5.5)
-        slow_in, slow_out = compute_dynamic_margins(3.0)
-        assert fast_in < in_m < slow_in
-        assert fast_out < out_m < slow_out
-
-
-class TestCalculateClipCps:
+class TestCalculateClipCps(unittest.TestCase):
     def test_empty_transcript_returns_default(self):
         cps, syllables = calculate_clip_cps("", 5.0)
         assert cps == 3.0
@@ -63,7 +31,7 @@ class TestCalculateClipCps:
         assert cps == 2.0
 
 
-class TestRefineSpeechBoundsLocked:
+class TestRefineSpeechBoundsLocked(unittest.TestCase):
     def test_out_point_extends_past_early_whisper_end_into_trailing_decay(self):
         # Whisper 標記 t_last=0.95 提前於實際語音結束 (1.0s)，且尾端有充分靜音供偵測。
         speech = _sine(1.0)

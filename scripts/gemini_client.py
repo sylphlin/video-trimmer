@@ -3,11 +3,9 @@
 完全使用 Vertex AI 與 ADC 認證，移除 AI Studio API Key 與 Files API。
 """
 
-import json
 import logging
 import os
 import time
-import uuid
 from pathlib import Path
 
 from tenacity import retry, stop_after_attempt, wait_exponential

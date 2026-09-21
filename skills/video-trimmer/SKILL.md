@@ -37,27 +37,20 @@ video-trimmer/
 ├── pyproject.toml                    # Standard Python packaging & CLI console scripts
 ├── requirements.txt                  # Python runtime dependencies
 ├── video_trimmer.py                  # Primary CLI entrypoint forwarder
-├── auto_rough_cut.py                 # Backward-compatibility CLI wrapper
 ├── scripts/                          # Core implementation modules
 │   ├── __init__.py
 │   ├── video_trimmer.py              # Master rough-cut orchestrator & acoustic engine
 │   ├── constants.py                  # Centrally managed named constants
 │   ├── exceptions.py                 # Custom exception hierarchy
-│   ├── acoustic.py                   # CPS, dynamic margins, text-locked acoustic bounds
+│   ├── acoustic.py                   # CPS calculation & text-locked acoustic bounds
 │   ├── transcribe.py                 # Whisper transcription, sentence merge, clip alignment
 │   ├── gemini_client.py              # Vertex AI (ADC) client & multimodal inference
 │   ├── gcs_utils.py                  # Google Cloud Storage upload & ephemeral cleanup
 │   ├── exporters.py                  # FCP7 XML / FCPXML / CSV generation
 │   └── render.py                     # ffprobe inspection & ffmpeg final render
 ├── tests/                            # Offline unit tests
-├── prompts/                          # Multimodal prompting specifications
-│   └── video_cut_prompt.md           # 5-rule subtraction & take selection prompt
-└── examples/                         # Verified project outputs & shooting scripts
-    ├── take 1_script.md              # Production shooting script example
-    ├── take1_edl.json                # Structured decision JSON
-    ├── take1_edl.csv                 # Spreadsheet decision table
-    ├── take1_edl.xml                 # FCP 7 XML (Premiere Pro & DaVinci Resolve)
-    └── take1_edl.fcpxml              # Final Cut Pro X FCPXML
+└── prompts/                          # Multimodal prompting specifications
+    └── video_cut_prompt.md           # 5-rule subtraction & take selection prompt
 ```
 
 ---

@@ -22,7 +22,6 @@ from pathlib import Path
 try:
     import soundfile as sf
     import numpy as np  # noqa: F401  (used transitively by acoustic.py; kept for early dependency check)
-    from google import genai
     from google.genai import types
 except ImportError as e:
     # 此處早於 main() 的 logging 設定即需中止，且是模組載入期的硬性依賴檢查
@@ -144,7 +143,6 @@ def _run(args):
             Path(__file__).parent.parent / "prompts" / "video_cut_prompt.md",
             Path.cwd() / "prompts" / "video_cut_prompt.md",
             Path(__file__).parent / "video-trimmer" / "prompts" / "video_cut_prompt.md",
-            Path(__file__).parent / "pansci-ai-rough-cut" / "prompts" / "video_cut_prompt.md",
         ]
         script_path = Path(args.script).resolve() if args.script else None
         prompt = build_prompt(prompt_candidates, script_path=script_path, whisper_units=whisper_units)

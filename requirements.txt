@@ -2,9 +2,9 @@
 google-genai>=0.1.1
 google-cloud-storage>=3.0.0
 google-auth>=2.0.0
+requests>=2.31.0
 soundfile>=0.12.1
 numpy>=1.24.0
-scipy>=1.10.0
 tenacity>=8.2.0
 
 # Whisper ASR backends (at least one recommended)

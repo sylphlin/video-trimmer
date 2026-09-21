@@ -24,26 +24,6 @@ except ImportError:
 HAS_WHISPER = HAS_MLX_WHISPER or HAS_FASTER_WHISPER
 
 
-def mmss_to_sec(val):
-    """處理模型將 mm:ss 輸出為 mm*100 + ss 的情況 (例如 724.8 -> 7m24.8s -> 444.8s)"""
-    val_int = int(val)
-    frac = val - val_int
-    m = val_int // 100
-    s = (val_int % 100) + frac
-    return m * 60 + s
-
-
-def resolve_timestamp(raw_val, total_dur):
-    """
-    智能判定時間戳：
-    僅當模型輸出之數值大於影片總長度時，判定為 mm*100+ss 格式 (例如 1241.0 代表 12分41秒)。
-    若數值在片長內，代表已經是絕對秒數，直接保留。
-    """
-    if raw_val > total_dur:
-        return mmss_to_sec(raw_val)
-    return raw_val
-
-
 def normalize_text(text):
     return re.sub(r'[^\w一-鿿]', '', text).lower()
 
