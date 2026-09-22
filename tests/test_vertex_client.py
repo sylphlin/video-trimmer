@@ -108,6 +108,7 @@ class TestVertexClient(unittest.TestCase):
         mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.text = '{"final_edl": []}'
+        mock_response.candidates = [MagicMock(finish_reason="STOP")]
         mock_response.usage_metadata.prompt_token_count = 100
         mock_response.usage_metadata.candidates_token_count = 50
         mock_response.usage_metadata.thoughts_token_count = 10
@@ -129,12 +130,20 @@ class TestVertexClient(unittest.TestCase):
         self.assertEqual(raw_json, '{"final_edl": []}')
         self.assertEqual(usage["total_tokens"], 160)
         self.assertGreaterEqual(duration, 0.0)
+        mock_types.ThinkingConfig.assert_called_once_with(thinking_budget=16384)
+        mock_types.GenerateContentConfig.assert_called_once_with(
+            response_mime_type="application/json",
+            temperature=0.0,
+            max_output_tokens=65536,
+            thinking_config=mock_types.ThinkingConfig.return_value,
+        )
         mock_client.models.generate_content.assert_called_once()
 
     def test_run_gemini_inference_agentic(self):
         mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.text = '{"final_edl": []}'
+        mock_response.candidates = [MagicMock(finish_reason="STOP")]
         mock_response.usage_metadata = None
         mock_client.models.generate_content.return_value = mock_response
 
@@ -152,8 +161,42 @@ class TestVertexClient(unittest.TestCase):
 
         self.assertEqual(raw_json, '{"final_edl": []}')
         self.assertEqual(usage["total_tokens"], 0)
+        mock_types.ThinkingConfig.assert_called_once_with(thinking_budget=16384)
+        mock_types.GenerateContentConfig.assert_called_once_with(
+            response_mime_type="application/json",
+            temperature=0.0,
+            max_output_tokens=65536,
+            thinking_config=mock_types.ThinkingConfig.return_value,
+        )
         mock_client.models.generate_content.assert_called_once()
+
+    def test_run_gemini_inference_max_tokens_raises(self):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"final_edl": [{"clip_id": 1'
+        mock_response.candidates = [MagicMock(finish_reason="FinishReason.MAX_TOKENS")]
+        mock_response.usage_metadata.prompt_token_count = 227587
+        mock_response.usage_metadata.thoughts_token_count = 7246
+        mock_response.usage_metadata.candidates_token_count = 946
+        mock_response.usage_metadata.total_token_count = 235779
+        mock_client.models.generate_content.return_value = mock_response
+
+        mock_types = MagicMock()
+
+        with self.assertRaises(GeminiAPIError) as ctx:
+            run_gemini_inference(
+                client=mock_client,
+                types_module=mock_types,
+                model="gemini-3.8-flash",
+                gcs_uri="gs://bucket/video.mp4",
+                mime_type="video/mp4",
+                prompt="test prompt",
+                agentic=True,
+            )
+        self.assertIn("max_output_tokens", str(ctx.exception))
+        self.assertIn("MAX_TOKENS", str(ctx.exception))
 
 
 if __name__ == "__main__":
     unittest.main()
+

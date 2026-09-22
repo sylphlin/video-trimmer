@@ -22,3 +22,8 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 - All cut points and keep-ranges must respect the Whisper word-level acoustic ground truth and onset snapping.
 - Do NOT truncate speech phonemes or spoken words.
 - Maintain speech padding and 15ms audio micro-crossfades to eliminate audio pop artifacts.
+
+## 5. Default Agentic Video Execution (`--agentic`)
+- Always include the `--agentic` flag when running `video_trimmer.py` or `video-trimmer`.
+- Omit `--agentic` only when the user explicitly requests static mode (`static`).
+

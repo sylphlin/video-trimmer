@@ -124,17 +124,17 @@ chmod +x setup.sh
 ## Command-Line Usage
 
 ```bash
-# Basic rough-cut execution
-python3 video_trimmer.py -i "raw_footage.mp4"
-
-# Align takes against a shooting script
-python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
-
-# Enable Agentic Video Understanding mode
+# Standard rough-cut execution (with Agentic Video Understanding)
 python3 video_trimmer.py -i "raw_footage.mp4" --agentic
 
+# Align takes against a shooting script
+python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
+
 # Apply compact pacing for fast-paced tutorials
-python3 video_trimmer.py -i "sample_take.mp4" --pacing compact --suffix "fast"
+python3 video_trimmer.py -i "sample_take.mp4" --pacing compact --suffix "fast" --agentic
+
+# Run in Static Multimodal mode (omit --agentic only when static sampling is desired)
+python3 video_trimmer.py -i "raw_footage.mp4"
 
 # Re-render locally from a cached EDL JSON without re-running Gemini inference
 python3 video_trimmer.py -i "raw_footage.mp4" --cached-json "raw_footage_agentic_edl.json"

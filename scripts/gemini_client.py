@@ -11,9 +11,11 @@ from pathlib import Path
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .constants import (
+    GEMINI_MAX_OUTPUT_TOKENS,
     GEMINI_RETRY_ATTEMPTS,
     GEMINI_RETRY_WAIT_MAX_SEC,
     GEMINI_RETRY_WAIT_MIN_SEC,
+    GEMINI_THINKING_BUDGET,
 )
 from .exceptions import GeminiAPIError
 from .gcs_utils import guess_mime_type, upload_file_to_gcs
@@ -211,7 +213,10 @@ def run_gemini_inference(client, types_module, model, gcs_uri, mime_type, prompt
             config=types_module.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.0,
-                max_output_tokens=8192,
+                max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
+                thinking_config=types_module.ThinkingConfig(
+                    thinking_budget=GEMINI_THINKING_BUDGET
+                ),
             ),
         )
     except Exception as e:
@@ -220,4 +225,16 @@ def run_gemini_inference(client, types_module, model, gcs_uri, mime_type, prompt
     raw_json = _extract_text_from_response(response)
     usage = _usage_from_generate_content(response)
     duration = time.time() - t0
+
+    candidates = getattr(response, "candidates", None)
+    if candidates:
+        finish_reason = getattr(candidates[0], "finish_reason", None)
+        if finish_reason is not None and str(finish_reason).upper().endswith("MAX_TOKENS"):
+            raise GeminiAPIError(
+                f"Gemini response reached max_output_tokens limit ({GEMINI_MAX_OUTPUT_TOKENS}) and truncated JSON output "
+                f"(finish_reason={finish_reason}, prompt_tokens={usage['prompt_tokens']}, "
+                f"thoughts_tokens={usage['thoughts_tokens']}, candidates_tokens={usage['candidates_tokens']})."
+            )
+
     return raw_json, usage, duration
+

@@ -46,14 +46,14 @@ chmod +x setup.sh
 ## 命令行使用说明 (CLI Usage)
 
 ```bash
-# 基础视频粗剪
-python3 video_trimmer.py -i "raw_footage.mp4"
+# 标准视频粗剪（默认启用 Agentic 视频理解模式）
+python3 video_trimmer.py -i "raw_footage.mp4" --agentic
 
 # 配合拍摄脚本对齐
-python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
+python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
-# 启用 Agentic 视频理解模式
-python3 video_trimmer.py -i "raw_footage.mp4" --agentic
+# 静态抽帧模式（仅在需要 Static Multimodal 时省略 --agentic）
+python3 video_trimmer.py -i "raw_footage.mp4"
 
 # 直接从 Google Drive 分享链接进行粗剪
 python3 video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" --agentic -o output/

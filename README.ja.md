@@ -45,14 +45,14 @@ chmod +x setup.sh
 ## コマンドライン使用法 (CLI Usage)
 
 ```bash
-# 基本ラフカット実行
-python3 video_trimmer.py -i "raw_footage.mp4"
+# 標準ラフカット実行（Agentic 動画理解モード有効）
+python3 video_trimmer.py -i "raw_footage.mp4" --agentic
 
 # 台本（スクリプト）を用いたアライメント
-python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
+python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
-# Agentic 動画理解モードの有効化
-python3 video_trimmer.py -i "raw_footage.mp4" --agentic
+# 静的マルチモーダルモード（static モード使用時のみ --agentic を省略）
+python3 video_trimmer.py -i "raw_footage.mp4"
 
 # Google Drive 共有リンクからの直接ラフカット
 python3 video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" --agentic -o output/

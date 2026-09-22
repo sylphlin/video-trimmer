@@ -45,14 +45,14 @@ chmod +x setup.sh
 ## 명령줄 사용법 (CLI Usage)
 
 ```bash
-# 기본 러프컷 실행
-python3 video_trimmer.py -i "raw_footage.mp4"
+# 표준 러프컷 실행 (Agentic 비디오 이해 모드 기본 사용)
+python3 video_trimmer.py -i "raw_footage.mp4" --agentic
 
 # 촬영 대본 정렬
-python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
+python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
-# Agentic 비디오 이해 모드 활성화
-python3 video_trimmer.py -i "raw_footage.mp4" --agentic
+# 정적 멀티모달 모드 (static 모드 사용 시에만 --agentic 생략)
+python3 video_trimmer.py -i "raw_footage.mp4"
 
 # Google Drive 공유 링크에서 직접 러프컷 실행
 python3 video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" --agentic -o output/

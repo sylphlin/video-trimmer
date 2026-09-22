@@ -102,18 +102,20 @@ gcloud auth application-default login
 
 ### Step 2: Execute Primary Video Trimmer Pipeline
 
+Always pass `--agentic` by default to enable Gemini Agentic Video Understanding. Omit `--agentic` only when the user explicitly requests static mode (`static`).
+
 ```bash
-# Standard automatic rough-cut (Auto adaptive pacing based on presenter CPS)
-video-trimmer -i "/path/to/raw_video.mp4"
+# Standard automatic rough-cut (Agentic Video Understanding enabled by default):
+video-trimmer -i "/path/to/raw_footage.mp4" --agentic
 
 # If production shooting script is provided (Highly recommended for structured shows):
-video-trimmer -i "take 1.mp4" --script "script.md"
-
-# Agentic Video Understanding mode (Dynamic multi-turn exploration for complex takes):
-video-trimmer -i "take 1.mp4" --agentic
+video-trimmer -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
 # Fast-paced YouTube tech / science explainer pacing:
-video-trimmer -i "news.mp4" --pacing compact
+video-trimmer -i "raw_footage.mp4" --pacing compact --agentic
+
+# Static Multimodal fallback (Use ONLY when the user explicitly requests static mode):
+video-trimmer -i "raw_footage.mp4"
 ```
 
 ### Step 3: Fast Local Iteration (Cached EDL Workflow)
