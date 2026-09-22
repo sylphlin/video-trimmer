@@ -8,7 +8,7 @@ import os
 import time
 from pathlib import Path
 
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from .constants import (
     GEMINI_MAX_OUTPUT_TOKENS,
@@ -22,9 +22,17 @@ from .transcribe import format_whisper_transcript_for_prompt
 
 logger = logging.getLogger(__name__)
 
+
+def _is_prefill_deadline_error(exc: Exception) -> bool:
+    """Return True if the error is a server-side prefill deadline timeout."""
+    msg = str(exc).upper()
+    return "PREFILL_REQUEST_DEADLINE_EXCEEDED" in msg or "DEADLINE_EXCEEDED" in msg
+
+
 # 僅網路呼叫（GCS 上傳 / Vertex AI 推論）適用重試，其餘本地運算不重試。
-# 最多 4 次嘗試（1 次原始呼叫 + 3 次重試），指數退避 1s -> 2s -> 4s。
+# 若遇 PREFILL_REQUEST_DEADLINE_EXCEEDED 則不原地盲目重試，交由上層進行階梯式降載。
 _network_retry = retry(
+    retry=retry_if_exception(lambda e: not _is_prefill_deadline_error(e)),
     stop=stop_after_attempt(GEMINI_RETRY_ATTEMPTS),
     wait=wait_exponential(multiplier=1, min=GEMINI_RETRY_WAIT_MIN_SEC, max=GEMINI_RETRY_WAIT_MAX_SEC),
     reraise=True,
@@ -187,36 +195,66 @@ def _usage_from_generate_content(response):
 
 
 def run_gemini_inference(client, types_module, model, gcs_uri, mime_type, prompt, agentic):
-    """調用 Vertex AI Gemini 取得初剪決策 JSON 原始文字與 token 用量。"""
+    """調用 Vertex AI Gemini 取得初剪決策 JSON 原始文字與 token 用量（含 Prefill 超時三階自動降載）。"""
     raw_json = ""
     usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
 
-    t0 = time.time()
-    if agentic:
-        logger.info("🤖 模式: Agentic Video Understanding (動態影格導航探索)")
-        video_part = types_module.Part(
-            file_data=types_module.FileData(file_uri=gcs_uri, mime_type=mime_type),
-            media_processing=types_module.MediaProcessing.AGENTIC,
-        )
-    else:
-        logger.info("📺 模式: Static Multimodal Video (靜態多模態視訊)")
-        video_part = types_module.Part(
-            file_data=types_module.FileData(file_uri=gcs_uri, mime_type=mime_type)
-        )
+    media_res_enum = getattr(types_module, "MediaResolution", None)
+    res_medium = getattr(media_res_enum, "MEDIA_RESOLUTION_MEDIUM", None) if media_res_enum else None
+    res_low = getattr(media_res_enum, "MEDIA_RESOLUTION_LOW", None) if media_res_enum else None
 
-    try:
-        response = _generate_content(
-            client,
-            model=model,
-            contents=[video_part, prompt],
-            config=types_module.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.0,
-                max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
-            ),
-        )
-    except Exception as e:
-        raise GeminiAPIError(f"Vertex AI Gemini generate_content 呼叫失敗: {e}") from e
+    if agentic:
+        attempts_plan = [
+            (True, res_medium, "🤖 模式: Agentic Video Understanding (動態影格導航探索, media_resolution=MEDIUM)"),
+            (True, res_low, "🤖 模式: Agentic Video Understanding (動態影格導航探索, media_resolution=LOW)"),
+            (False, res_low, "📺 模式: Static Multimodal Video (靜態多模態視訊保底, media_resolution=LOW)"),
+        ]
+    else:
+        attempts_plan = [
+            (False, None, "📺 模式: Static Multimodal Video (靜態多模態視訊)"),
+            (False, res_low, "📺 模式: Static Multimodal Video (靜態多模態視訊, media_resolution=LOW)"),
+        ]
+
+    t0 = time.time()
+    response = None
+    for idx, (use_agentic, media_res, mode_label) in enumerate(attempts_plan):
+        logger.info(mode_label)
+        if use_agentic:
+            video_part = types_module.Part(
+                file_data=types_module.FileData(file_uri=gcs_uri, mime_type=mime_type),
+                media_processing=types_module.MediaProcessing.AGENTIC,
+            )
+        else:
+            video_part = types_module.Part(
+                file_data=types_module.FileData(file_uri=gcs_uri, mime_type=mime_type)
+            )
+
+        config_kwargs = {
+            "response_mime_type": "application/json",
+            "temperature": 0.0,
+            "max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
+        }
+        if media_res is not None:
+            config_kwargs["media_resolution"] = media_res
+
+        try:
+            response = _generate_content(
+                client,
+                model=model,
+                contents=[video_part, prompt],
+                config=types_module.GenerateContentConfig(**config_kwargs),
+            )
+            break
+        except Exception as e:
+            if _is_prefill_deadline_error(e) and idx < len(attempts_plan) - 1:
+                next_label = attempts_plan[idx + 1][2]
+                logger.warning(
+                    "Vertex AI Prefill 超時 (%s)，自動降載切換至下一階段: %s",
+                    e,
+                    next_label,
+                )
+                continue
+            raise GeminiAPIError(f"Vertex AI Gemini generate_content 呼叫失敗: {e}") from e
 
     raw_json = _extract_text_from_response(response)
     usage = _usage_from_generate_content(response)
@@ -233,4 +271,5 @@ def run_gemini_inference(client, types_module, model, gcs_uri, mime_type, prompt
             )
 
     return raw_json, usage, duration
+
 

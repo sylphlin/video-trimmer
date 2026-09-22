@@ -163,8 +163,39 @@ class TestVertexClient(unittest.TestCase):
             response_mime_type="application/json",
             temperature=0.0,
             max_output_tokens=65536,
+            media_resolution=mock_types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
         )
         mock_client.models.generate_content.assert_called_once()
+
+    def test_run_gemini_inference_prefill_deadline_fallback(self):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"final_edl": [{"clip_id": 1}]}'
+        mock_response.candidates = [MagicMock(finish_reason="STOP")]
+        mock_response.usage_metadata = None
+
+        # Simulate PREFILL_REQUEST_DEADLINE_EXCEEDED on Stage 1 (MEDIUM) and Stage 2 (LOW), succeeding on Stage 3 (Static LOW)
+        mock_client.models.generate_content.side_effect = [
+            RuntimeError("status = DEADLINE_EXCEEDED: Request deadline exceeded before prefill finished. error_code: PREFILL_REQUEST_DEADLINE_EXCEEDED"),
+            RuntimeError("status = DEADLINE_EXCEEDED: Request deadline exceeded before prefill finished. error_code: PREFILL_REQUEST_DEADLINE_EXCEEDED"),
+            mock_response,
+        ]
+
+        mock_types = MagicMock()
+
+        raw_json, usage, duration = run_gemini_inference(
+            client=mock_client,
+            types_module=mock_types,
+            model="gemini-3.8-flash",
+            gcs_uri="gs://bucket/video.mp4",
+            mime_type="video/mp4",
+            prompt="test prompt",
+            agentic=True,
+        )
+
+        self.assertEqual(raw_json, '{"final_edl": [{"clip_id": 1}]}')
+        # Exactly 3 calls (1 per stage, no blind 4x retry on prefill deadline error)
+        self.assertEqual(mock_client.models.generate_content.call_count, 3)
 
     def test_run_gemini_inference_max_tokens_raises(self):
         mock_client = MagicMock()
@@ -195,4 +226,5 @@ class TestVertexClient(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
