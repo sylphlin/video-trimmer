@@ -172,12 +172,48 @@ def build_prompt(prompt_file_candidates, script_path=None, whisper_units=None):
     return prompt
 
 
-def _extract_text_from_response(response):
-    if hasattr(response, "text") and response.text:
-        return response.text
-    if hasattr(response, "candidates") and response.candidates:
-        parts = getattr(response.candidates[0].content, "parts", [])
-        return "\n".join([p.text for p in parts if hasattr(p, "text") and p.text])
+def _extract_text_from_response(response) -> str:
+    """
+    Extract visible non-thought text content from a Gemini response object.
+    Support responses with dynamic thinking tokens and multi-part content.
+    """
+    if not response:
+        return ""
+
+    # Strategy 1: Inspect candidate parts and filter out thought blocks
+    candidates = getattr(response, "candidates", None)
+    if candidates and len(candidates) > 0:
+        content = getattr(candidates[0], "content", None)
+        parts = getattr(content, "parts", None) if content else None
+        if parts:
+            # Collect parts that are not marked as thought
+            visible_texts = []
+            for part in parts:
+                text = getattr(part, "text", None)
+                is_thought = getattr(part, "thought", False) is True
+                if isinstance(text, str) and text and not is_thought:
+                    visible_texts.append(text)
+
+            if visible_texts:
+                return "\n".join(visible_texts).strip()
+
+            # Fallback: if all parts are marked or none marked, extract from last part with text
+            all_texts = [
+                getattr(p, "text", None)
+                for p in parts
+                if isinstance(getattr(p, "text", None), str) and getattr(p, "text", None)
+            ]
+            if all_texts:
+                return all_texts[-1].strip()
+
+    # Strategy 2: Safely access response.text attribute
+    try:
+        raw_text = getattr(response, "text", None)
+        if raw_text and isinstance(raw_text, str):
+            return raw_text.strip()
+    except Exception:
+        pass
+
     return ""
 
 

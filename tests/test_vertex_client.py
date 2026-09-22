@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from scripts.exceptions import GeminiAPIError
 from scripts.gemini_client import (
+    _extract_text_from_response,
     get_gemini_client,
     load_env_file,
     run_gemini_inference,
@@ -222,6 +223,33 @@ class TestVertexClient(unittest.TestCase):
             )
         self.assertIn("max_output_tokens", str(ctx.exception))
         self.assertIn("MAX_TOKENS", str(ctx.exception))
+
+    def test_extract_text_with_thinking_parts(self):
+        """Verify that thought parts are filtered and visible text is returned."""
+        mock_response = MagicMock()
+
+        thought_part = MagicMock()
+        thought_part.text = "This is internal thinking."
+        thought_part.thought = True
+
+        answer_part = MagicMock()
+        answer_part.text = '{"final_edl": [{"clip_id": 1}]}'
+        answer_part.thought = False
+
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [thought_part, answer_part]
+        mock_response.candidates = [mock_candidate]
+
+        extracted = _extract_text_from_response(mock_response)
+        self.assertEqual(extracted, '{"final_edl": [{"clip_id": 1}]}')
+
+    def test_extract_text_fallback_to_response_text(self):
+        """Verify fallback to response.text when no candidates exist."""
+        mock_response = MagicMock(spec=["text"])
+        mock_response.text = '{"final_edl": []}'
+
+        extracted = _extract_text_from_response(mock_response)
+        self.assertEqual(extracted, '{"final_edl": []}')
 
 
 if __name__ == "__main__":
