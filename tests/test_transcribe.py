@@ -108,3 +108,36 @@ class TestMergeWhisperSegmentsToSentences(unittest.TestCase):
         sentences = merge_whisper_segments_to_sentences(segs)
         assert len(sentences) == 2
 
+    def test_retake_segments_are_never_merged_into_same_sentence(self):
+        """講錯重講的相鄰 Whisper segments（即使停頓僅 0.25s）強制保持為獨立 Sentence ID"""
+        segs = [
+            _seg(1, 0.0, 2.0, "缺點是這套系統運作的前提"),
+            _seg(2, 2.25, 4.5, "缺點是這套系統運作的前提是連接"),
+            _seg(3, 4.70, 7.2, "缺點是這套系統運作的前提是連接比對"),
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 3
+        assert sentences[0]["text"] == "缺點是這套系統運作的前提"
+        assert sentences[1]["text"] == "缺點是這套系統運作的前提是連接"
+        assert sentences[2]["text"] == "缺點是這套系統運作的前提是連接比對"
+
+    def test_paused_in_sentence_restart_splits_at_physical_silence(self):
+        """單一片段內若存在物理停頓 (>=0.18s) 且停頓後重複開頭前綴，於物理停頓處拆分為獨立 Sentence"""
+        words = [
+            {"word": "例如", "start": 0.0, "end": 0.2},
+            {"word": "你", "start": 0.2, "end": 0.35},
+            {"word": "自己", "start": 0.35, "end": 0.60},
+            # 物理停頓 0.25s (>= 0.18s) 後重講「例如你...」
+            {"word": "例如", "start": 0.85, "end": 1.05},
+            {"word": "你", "start": 1.05, "end": 1.20},
+            {"word": "帶著", "start": 1.20, "end": 1.45},
+            {"word": "自己", "start": 1.45, "end": 1.70},
+            {"word": "手機", "start": 1.70, "end": 2.00},
+        ]
+        segs = [_seg(1, 0.0, 2.0, "例如你自己 例如你帶著自己手機", words=words)]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 2
+        assert sentences[0]["text"] == "例如你自己"
+        assert sentences[1]["text"] == "例如你帶著自己手機"
+
+
