@@ -130,12 +130,10 @@ class TestVertexClient(unittest.TestCase):
         self.assertEqual(raw_json, '{"final_edl": []}')
         self.assertEqual(usage["total_tokens"], 160)
         self.assertGreaterEqual(duration, 0.0)
-        mock_types.ThinkingConfig.assert_called_once_with(thinking_budget=16384)
         mock_types.GenerateContentConfig.assert_called_once_with(
             response_mime_type="application/json",
             temperature=0.0,
             max_output_tokens=65536,
-            thinking_config=mock_types.ThinkingConfig.return_value,
         )
         mock_client.models.generate_content.assert_called_once()
 
@@ -161,12 +159,10 @@ class TestVertexClient(unittest.TestCase):
 
         self.assertEqual(raw_json, '{"final_edl": []}')
         self.assertEqual(usage["total_tokens"], 0)
-        mock_types.ThinkingConfig.assert_called_once_with(thinking_budget=16384)
         mock_types.GenerateContentConfig.assert_called_once_with(
             response_mime_type="application/json",
             temperature=0.0,
             max_output_tokens=65536,
-            thinking_config=mock_types.ThinkingConfig.return_value,
         )
         mock_client.models.generate_content.assert_called_once()
 

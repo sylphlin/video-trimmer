@@ -25,9 +25,8 @@ GEMINI_RETRY_ATTEMPTS = 4
 GEMINI_RETRY_WAIT_MIN_SEC = 1
 GEMINI_RETRY_WAIT_MAX_SEC = 4
 
-# --- Gemini output token limit and thinking budget ---
-# Set max_output_tokens to 65536 and thinking_budget to 16384.
-# This reserves 49152 tokens for JSON output after deep reasoning.
+# --- Gemini output token limit ---
+# Set max_output_tokens to 65536 while preserving native dynamic thinking.
 GEMINI_MAX_OUTPUT_TOKENS = 65536
-GEMINI_THINKING_BUDGET = 16384
+
 

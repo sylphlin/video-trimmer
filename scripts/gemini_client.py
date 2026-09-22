@@ -15,7 +15,6 @@ from .constants import (
     GEMINI_RETRY_ATTEMPTS,
     GEMINI_RETRY_WAIT_MAX_SEC,
     GEMINI_RETRY_WAIT_MIN_SEC,
-    GEMINI_THINKING_BUDGET,
 )
 from .exceptions import GeminiAPIError
 from .gcs_utils import guess_mime_type, upload_file_to_gcs
@@ -214,9 +213,6 @@ def run_gemini_inference(client, types_module, model, gcs_uri, mime_type, prompt
                 response_mime_type="application/json",
                 temperature=0.0,
                 max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
-                thinking_config=types_module.ThinkingConfig(
-                    thinking_budget=GEMINI_THINKING_BUDGET
-                ),
             ),
         )
     except Exception as e:
