@@ -85,6 +85,18 @@ class TestFuzzySentenceSplit(unittest.TestCase):
         self.assertEqual(sentences[1]["orig_segment_ids"], [8])
         self.assertAlmostEqual(sentences[1]["start"], 39.16, places=2)
 
+    def test_normal_speech_transition_not_false_restart(self):
+        """Verify that Sentence A ending with words that appear at the start of Sentence B is NOT a restart."""
+        curr_text = "打開了潘朵拉的盒子對就是WiFi你大概也聽過"
+        next_text = "你大概也聽過WiFi訊號撞到人體會出現細微衰減"
+        self.assertFalse(is_fuzzy_prefix_restart(curr_text, next_text))
+
+    def test_genuine_prefix_restart_still_detected(self):
+        """Verify that speaker restarting the same sentence opening is detected as a restart."""
+        curr_text = "完美的監控工具誕生了德國卡爾斯魯爾理工學院"
+        next_text = "完美的監控工具誕生了德國卡爾斯魯爾理工學院的資安研究團隊"
+        self.assertTrue(is_fuzzy_prefix_restart(curr_text, next_text))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,7 +23,8 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 - Do NOT truncate speech phonemes or spoken words.
 - Maintain speech padding and 15ms audio micro-crossfades to eliminate audio pop artifacts.
 
-## 5. Default Agentic Video Execution (`--agentic`)
-- Always include the `--agentic` flag when running `video_trimmer.py` or `video-trimmer`.
-- Omit `--agentic` only when the user explicitly requests static mode (`static`).
+## 5. Default Static Multimodal Execution
+- Run `video_trimmer.py` or `video-trimmer` in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) for fast, timeout-free inference.
+- Include `--agentic` only when the user explicitly requests Agentic Video Understanding mode.
+
 

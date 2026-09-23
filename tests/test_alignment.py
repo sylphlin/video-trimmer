@@ -99,27 +99,22 @@ class TestAlignClipWithWhisper(unittest.TestCase):
         assert t_first == pytest.approx(2.0, abs=0.05)
         assert t_last == pytest.approx(3.0, abs=0.05)
 
-    def test_resolve_clip_sub_units_strips_ng_retakes_and_dead_air_pauses(self):
-        """驗證 resolve_clip_sub_units 能自動剔除區間內的 NG 重複句，並在 >=0.40s 看稿停頓處拆開收緊"""
+    def test_resolve_clip_sub_units_preserves_selected_sentences_and_splits_dead_air_pauses(self):
+        """驗證 resolve_clip_sub_units 尊重 Gemini 選取的 sentence_ids 不做破壞性刪除，並在 >=0.40s 看稿停頓處拆開收緊"""
         units = [
-            _sentence(1, 10.0, 12.0, "完美的監控工具誕生了對就是WiFi", _words_for("完美的監控工具誕生了對就是WiFi", 10.0, 2.0)),
+            _sentence(1, 10.0, 12.0, "打開了潘朵拉的盒子對就是WiFi你大概也聽過", _words_for("打開了潘朵拉的盒子對就是WiFi你大概也聽過", 10.0, 2.0)),
             _sentence(2, 12.5, 14.5, "你大概也聽過WiFi訊號撞到人體會出現細微摔", _words_for("你大概也聽過WiFi訊號撞到人體會出現細微摔", 12.5, 2.0)),
             _sentence(3, 16.0, 19.0, "你大概也聽過WiFi訊號撞到人體會出現細微衰減與相位變化", _words_for("你大概也聽過WiFi訊號撞到人體會出現細微衰減與相位變化", 16.0, 3.0)),
         ]
-        # 即使模型回傳 start_sentence_id=1..end_sentence_id=3 把中間的 NG Sentence 2 與 3.5秒停頓包進去
-        clip = {"start_sentence_id": 1, "end_sentence_id": 3, "topic": "HOOK"}
+        # Gemini 選取了 Sentence 1 與 Sentence 3 (跳過 NG Sentence 2)，且 Sentence 1 結尾與 Sentence 3 開頭為頂真修辭銜接
+        clip = {"sentence_ids": [1, 3], "start_sentence_id": 1, "end_sentence_id": 3, "topic": "HOOK"}
         sub_units = resolve_clip_sub_units(units, clip, total_dur=30.0)
 
-        # Sentence 2 (細微摔) 應被自動識別為 Sentence 3 (細微衰減) 的 NG 前身並剔除，
-        # 且 Sentence 1 (10.0~12.0s) 與 Sentence 3 (16.0~19.0s) 因中間存在長空白而被拆為 2 個緊湊子片段！
+        # Sentence 1 絕不會被誤刪，且因與 Sentence 3 間隔長空白而被拆為 2 個緊湊子片段！
         assert len(sub_units) == 2
         assert sub_units[0]["t_first"] == pytest.approx(10.0, abs=0.05)
         assert sub_units[0]["t_last"] == pytest.approx(12.0, abs=0.05)
         assert sub_units[1]["t_first"] == pytest.approx(16.0, abs=0.05)
         assert sub_units[1]["t_last"] == pytest.approx(19.0, abs=0.05)
-        assert is_earlier_sentence_ng_retake(
-            "你大概也聽過WiFi訊號撞到人體會出現細微摔",
-            "你大概也聽過WiFi訊號撞到人體會出現細微衰減與相位變化",
-        )
 
 

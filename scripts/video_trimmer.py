@@ -289,14 +289,14 @@ def _run(args):
         }
         _append_usage_log(out_dir, video_path, args.model, usage, mode, duration)
 
-    # 第三階段：比照字幕邏輯——文字剪輯時間鎖定、句間空白剔除與 Last-Take-Wins 句子過濾
-    logger.info("==> 5. 執行文字剪輯時間鎖定與句間空白/NG 剔除 (Text-Based Sub-Clip Locking)...")
+    # 第三階段：文字剪輯時間鎖定與聲學收緊 (Text-Based Sub-Clip Locking)
+    logger.info("==> 5. 執行文字剪輯時間鎖定與聲學收緊 (Text-Based Sub-Clip Locking)...")
     temp_wav = out_dir / f"temp_{base_name}.wav"
     subprocess.run(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     audio, sr = sf.read(str(temp_wav))
 
-    # 5a. 將每個宏觀 Clip 拆解為去除中間長空白 (>=0.40s) 與跳過 NG 句的細粒度語音子片段
+    # 5a. 將每個宏觀 Clip 拆解為去除中間長空白 (>=0.40s) 的細粒度語音子片段
     expanded_units = []
     for c in model_edl.get("final_edl", []):
         sub_units = resolve_clip_sub_units(whisper_units, c, total_dur)
@@ -312,22 +312,8 @@ def _run(args):
                 "transcript": su["transcript"],
             })
 
-    # 5b. 跨子片段 (Cross-Sub-Clip) Last-Take-Wins 重複口條過濾（例如前一段結尾半句 NG 與下一段開頭重講）
-    filtered_units = []
-    for i, u_curr in enumerate(expanded_units):
-        if i + 1 < len(expanded_units):
-            u_next = expanded_units[i + 1]
-            if (
-                float(u_next["t_first"]) - float(u_curr["t_last"]) <= 25.0
-                and is_earlier_sentence_ng_retake(u_curr["transcript"], u_next["transcript"])
-            ):
-                logger.info(
-                    "    [跨段重講剔除] 捨棄前段重複口條 ('%s') -> 保留後段完整口條 ('%s')",
-                    u_curr["transcript"],
-                    u_next["transcript"],
-                )
-                continue
-        filtered_units.append(u_curr)
+    # Step 5b removed: Do not delete units with Python heuristics.
+    filtered_units = expanded_units
 
     # 5c. 針對每個保留子片段獨立執行聲學包絡收緊與微呼吸邊界鎖定
     refined_edl = []

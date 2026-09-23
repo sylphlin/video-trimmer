@@ -94,13 +94,15 @@ def is_fuzzy_prefix_restart(
     if anchor_len >= 3 and c_head[:anchor_len] == n_head[:anchor_len]:
         return True
 
-    # 2. Substring containment between opening clauses (restrict c_head match to opening of n_head)
+    # 2. Opening clause containment (strictly compare c_head and n_head)
+    # A restart occurs only when the start of n_clean matches the start of c_clean.
+    # DO NOT search n_head across the entire c_clean string.
     if len(c_head) >= min_common_chars and c_head[:min_common_chars] in n_head[: min_common_chars + 3]:
         return True
-    if len(n_head) >= min_common_chars and n_head[:min_common_chars] in c_clean:
+    if len(n_head) >= min_common_chars and n_head[:min_common_chars] in c_head[: min_common_chars + 3]:
         return True
 
-    # 3. Fuzzy SequenceMatcher comparison (handles homophones like 知識 vs 姿態)
+    # 3. Fuzzy SequenceMatcher comparison (handles homophones)
     compare_len = min(len(c_head), len(n_head))
     if compare_len >= 4:
         ratio = difflib.SequenceMatcher(None, c_head[:compare_len], n_head[:compare_len]).ratio()
@@ -667,7 +669,7 @@ def _split_sentence_words_by_internal_gap(sentence: dict, max_word_gap: float = 
             "text": "".join(x.get("word", "") for x in cur_words).strip(),
         })
 
-    return filter_ng_retake_sentences(chunks, max_lookahead=2, max_time_span=15.0)
+    return chunks
 
 
 def resolve_clip_sub_units(
@@ -678,10 +680,10 @@ def resolve_clip_sub_units(
     max_word_gap: float = 0.45,
 ) -> list[dict]:
     """
-    將單一 Clip 決策解析為一或多個「無句間長空白、無中間夾雜 NG 句」的緊湊語音子片段 (Sub-units)。
-    1. 優先讀取 `sentence_ids` 陣列（明確排除中間跳過的 NG 句）；若無則讀取 `start_sentence_id`..`end_sentence_id`。
-    2. 自動執行 `filter_ng_retake_sentences` 剔除區間內重講前的 NG 句。
-    3. 只要相鄰句子之間跳過了 NG 句、或存在 >= max_internal_gap (0.40s) 的看稿停頓、
+    將單一 Clip 決策解析為一或多個「無句間長空白」的緊湊語音子片段 (Sub-units)。
+    1. 優先讀取 `sentence_ids` 陣列；若無則讀取 `start_sentence_id`..`end_sentence_id` 或時間範圍。
+    2. 尊重 Gemini 選取的所有 Sentence ID，不執行破壞性字串刪除 (filter_ng_retake_sentences)。
+    3. 只要相鄰句子之間存在 >= max_internal_gap (0.40s) 的看稿停頓、
        或句內單字間存在 >= max_word_gap (0.45s) 的空白停頓，即於該物理靜音區拆開為獨立子片段，
        交由後續 `refine_speech_bounds_locked` 逐一收緊頭尾空白。
     """
@@ -711,6 +713,16 @@ def resolve_clip_sub_units(
         if start_id is not None and end_id is not None:
             matched = [s for s in whisper_units if start_id <= s.get("id", 0) <= end_id]
 
+    if not matched and ("source_in" in clip_data or "source_out" in clip_data):
+        s_in = float(clip_data.get("source_in", 0.0))
+        s_out = float(clip_data.get("source_out", total_dur))
+        matched = [
+            u for u in whisper_units
+            if u.get("is_target_speaker", True)
+            and float(u.get("end", 0.0)) >= s_in - 0.20
+            and float(u.get("start", 0.0)) <= s_out + 0.20
+        ]
+
     if not matched:
         t_first, t_last, prev_end, next_start = align_clip_with_whisper(whisper_units, clip_data, total_dur)
         return [{
@@ -726,8 +738,8 @@ def resolve_clip_sub_units(
     if target_matched:
         matched = target_matched
 
-    # 執行句子級 Last Take Wins 過濾，剔除區間內重講前的 NG 句
-    matched = filter_ng_retake_sentences(matched)
+    # Do not execute filter_ng_retake_sentences here.
+    # Gemini has already selected the intended takes.
 
     # 拆解為細粒度發音塊（消除句內 >= 0.45s 的空白停頓）
     fine_chunks = []
