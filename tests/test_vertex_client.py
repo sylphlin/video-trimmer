@@ -131,10 +131,14 @@ class TestVertexClient(unittest.TestCase):
         self.assertEqual(raw_json, '{"final_edl": []}')
         self.assertEqual(usage["total_tokens"], 160)
         self.assertGreaterEqual(duration, 0.0)
+        mock_types.ThinkingConfig.assert_called_once_with(thinking_budget=3800)
+        mock_types.AutomaticFunctionCallingConfig.assert_called_once_with(disable=True)
         mock_types.GenerateContentConfig.assert_called_once_with(
             response_mime_type="application/json",
             temperature=0.0,
             max_output_tokens=65536,
+            thinking_config=mock_types.ThinkingConfig.return_value,
+            automatic_function_calling=mock_types.AutomaticFunctionCallingConfig.return_value,
         )
         mock_client.models.generate_content.assert_called_once()
 
@@ -156,14 +160,22 @@ class TestVertexClient(unittest.TestCase):
             mime_type="video/mp4",
             prompt="test prompt",
             agentic=True,
+            num_sentences=62,
+            video_duration=504.0,
+            start_offset="854s",
+            end_offset="1382s",
         )
 
         self.assertEqual(raw_json, '{"final_edl": []}')
         self.assertEqual(usage["total_tokens"], 0)
+        mock_types.ThinkingConfig.assert_called_once_with(thinking_budget=3910)
+        mock_types.VideoMetadata.assert_called_once_with(start_offset="854s", end_offset="1382s")
         mock_types.GenerateContentConfig.assert_called_once_with(
             response_mime_type="application/json",
             temperature=0.0,
             max_output_tokens=65536,
+            thinking_config=mock_types.ThinkingConfig.return_value,
+            automatic_function_calling=mock_types.AutomaticFunctionCallingConfig.return_value,
             media_resolution=mock_types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
         )
         mock_client.models.generate_content.assert_called_once()

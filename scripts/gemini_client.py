@@ -230,10 +230,89 @@ def _usage_from_generate_content(response):
     }
 
 
-def run_gemini_inference(client, types_module, model, gcs_uri, mime_type, prompt, agentic):
-    """調用 Vertex AI Gemini 取得初剪決策 JSON 原始文字與 token 用量（含 Prefill 超時三階自動降載）。"""
+def calculate_dynamic_thinking_budget(num_sentences: int, video_duration_seconds: float) -> int:
+    """
+    Calculate the optimal thinking budget for Gemini Flash Thinking.
+
+    ASD-STE100:
+    This function calculates a token budget for model reasoning.
+    It balances decision requirements with the 300-second network deadline.
+
+    Args:
+        num_sentences: Total count of Whisper transcript sentences.
+        video_duration_seconds: Total duration of the video input in seconds.
+
+    Returns:
+        Integer token count between 1024 and 5120.
+    """
+    # 1. Estimate cognitive demand for sentence comparison
+    cognitive_demand = 500 + (max(0, int(num_sentences)) * 55)
+
+    # 2. Calculate remaining seconds before the 300-second gateway deadline
+    est_video_exploration_sec = min(70.0, 15.0 + (max(0.0, float(video_duration_seconds)) * 0.05))
+    est_json_output_sec = 25.0
+
+    # Target completion within 210 seconds (provides 90 seconds of safety cushion)
+    available_thinking_sec = max(25.0, 210.0 - est_video_exploration_sec - est_json_output_sec)
+    safe_max_tokens = int(available_thinking_sec * 42.0)
+
+    # 3. Restrict budget within safe operational limits
+    target_budget = min(cognitive_demand, safe_max_tokens)
+    return max(1024, min(target_budget, 5120))
+
+
+def merge_chunked_edl(chunk_edl_results: list[dict], project_title: str) -> dict:
+    """
+    Merge multiple chunk EDL results into a single project EDL.
+
+    ASD-STE100:
+    This function combines clip lists from all chunks.
+    It renumbers clip IDs in chronological order.
+    """
+    merged_clips = []
+    clip_counter = 1
+    for chunk in chunk_edl_results:
+        for clip in chunk.get("final_edl", []):
+            clip_copy = dict(clip)
+            clip_copy["clip_id"] = clip_counter
+            merged_clips.append(clip_copy)
+            clip_counter += 1
+
+    return {
+        "project_title": project_title,
+        "pacing_style": "text_based_whisper_grounded",
+        "final_edl": merged_clips,
+    }
+
+
+def run_gemini_inference(
+    client,
+    types_module,
+    model,
+    gcs_uri,
+    mime_type,
+    prompt,
+    agentic,
+    num_sentences: int = 60,
+    video_duration: float = 300.0,
+    start_offset: str | None = None,
+    end_offset: str | None = None,
+):
+    """調用 Vertex AI Gemini 取得初剪決策 JSON 原始文字與 token 用量（含動態思維預算、VideoMetadata 視窗與 Prefill 三階降載）。"""
     raw_json = ""
     usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
+
+    dynamic_budget = calculate_dynamic_thinking_budget(
+        num_sentences=num_sentences,
+        video_duration_seconds=video_duration,
+    )
+    logger.info(
+        "動態思維預算: %d tokens (台詞句數=%d, 區間時長=%.1fs%s)",
+        dynamic_budget,
+        num_sentences,
+        video_duration,
+        f", 視訊裁切={start_offset}~{end_offset}" if (start_offset and end_offset) else "",
+    )
 
     media_res_enum = getattr(types_module, "MediaResolution", None)
     res_medium = getattr(media_res_enum, "MEDIA_RESOLUTION_MEDIUM", None) if media_res_enum else None
@@ -255,21 +334,28 @@ def run_gemini_inference(client, types_module, model, gcs_uri, mime_type, prompt
     response = None
     for idx, (use_agentic, media_res, mode_label) in enumerate(attempts_plan):
         logger.info(mode_label)
+        part_kwargs = {
+            "file_data": types_module.FileData(file_uri=gcs_uri, mime_type=mime_type),
+        }
+        if start_offset is not None and end_offset is not None and hasattr(types_module, "VideoMetadata"):
+            part_kwargs["video_metadata"] = types_module.VideoMetadata(
+                start_offset=start_offset,
+                end_offset=end_offset,
+            )
         if use_agentic:
-            video_part = types_module.Part(
-                file_data=types_module.FileData(file_uri=gcs_uri, mime_type=mime_type),
-                media_processing=types_module.MediaProcessing.AGENTIC,
-            )
-        else:
-            video_part = types_module.Part(
-                file_data=types_module.FileData(file_uri=gcs_uri, mime_type=mime_type)
-            )
+            part_kwargs["media_processing"] = types_module.MediaProcessing.AGENTIC
+
+        video_part = types_module.Part(**part_kwargs)
 
         config_kwargs = {
             "response_mime_type": "application/json",
             "temperature": 0.0,
             "max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
         }
+        if hasattr(types_module, "ThinkingConfig"):
+            config_kwargs["thinking_config"] = types_module.ThinkingConfig(thinking_budget=dynamic_budget)
+        if hasattr(types_module, "AutomaticFunctionCallingConfig"):
+            config_kwargs["automatic_function_calling"] = types_module.AutomaticFunctionCallingConfig(disable=True)
         if media_res is not None:
             config_kwargs["media_resolution"] = media_res
 
@@ -307,5 +393,6 @@ def run_gemini_inference(client, types_module, model, gcs_uri, mime_type, prompt
             )
 
     return raw_json, usage, duration
+
 
 

@@ -727,3 +727,223 @@ def resolve_clip_sub_units(
 
     return sub_units
 
+
+def calculate_active_script_window(
+    whisper_units: list[dict],
+    script_text: str,
+    total_duration: float,
+    padding_seconds: float = 20.0,
+) -> tuple[float, float, list[dict]]:
+    """
+    Align spoken clauses from a reference script against Whisper sentences to locate
+    the active recording window in a multi-episode or long camera roll.
+
+    ASD-STE100:
+    This function matches script clauses with transcript sentences.
+    It returns the start time, end time, and sentences inside the active window.
+    """
+    if not whisper_units or not script_text or not script_text.strip():
+        return 0.0, total_duration, whisper_units
+
+    # Extract meaningful spoken clauses from script (ignore markdown headers and stage brackets)
+    raw_lines = re.split(r"[\n。！？!?；;]+", script_text)
+    script_clauses = []
+    for line in raw_lines:
+        cleaned = re.sub(r"^\s*[#*>\-\d.]+\s*", "", line)
+        cleaned = re.sub(r"（.*?）|\(.*?\)|【.*?】|\[.*?\]", "", cleaned)
+        norm = normalize_text(cleaned)
+        if len(norm) >= 6:
+            script_clauses.append(norm)
+
+    if not script_clauses:
+        return 0.0, total_duration, whisper_units
+
+    matched_unit_indices = set()
+    matched_clause_count = 0
+
+    norm_units = [(idx, normalize_text(u.get("text", ""))) for idx, u in enumerate(whisper_units)]
+
+    for clause in script_clauses:
+        clause_matched = False
+        for idx, u_norm in norm_units:
+            if len(u_norm) < 4:
+                continue
+            if clause in u_norm or (len(u_norm) >= 6 and u_norm in clause):
+                matched_unit_indices.add(idx)
+                clause_matched = True
+                continue
+            matcher = difflib.SequenceMatcher(None, clause, u_norm)
+            longest = matcher.find_longest_match(0, len(clause), 0, len(u_norm))
+            if longest.size >= 6 or (min(len(clause), len(u_norm)) >= 8 and matcher.ratio() >= 0.58):
+                matched_unit_indices.add(idx)
+                clause_matched = True
+        if clause_matched:
+            matched_clause_count += 1
+
+    # Require at least 40% script clause coverage to activate windowing
+    coverage = matched_clause_count / max(1, len(script_clauses))
+    if not matched_unit_indices or coverage < 0.40:
+        return 0.0, total_duration, whisper_units
+
+    sorted_indices = sorted(matched_unit_indices)
+    first_idx = sorted_indices[0]
+    last_idx = sorted_indices[-1]
+
+    win_start = max(0.0, round(float(whisper_units[first_idx].get("start", 0.0)) - padding_seconds, 2))
+    win_end = min(total_duration, round(float(whisper_units[last_idx].get("end", total_duration)) + padding_seconds, 2))
+
+    # If the window already covers >= 85% of the video, keep the full video
+    if (win_end - win_start) >= total_duration * 0.85:
+        return 0.0, total_duration, whisper_units
+
+    filtered_units = [
+        u for u in whisper_units
+        if float(u.get("end", 0.0)) >= win_start and float(u.get("start", 0.0)) <= win_end
+    ]
+    return win_start, win_end, (filtered_units or whisper_units)
+
+
+def _are_sentences_retake_related(text_a: str, text_b: str) -> bool:
+    """
+    Check if two sentences belong to the same retake cluster.
+    """
+    if is_earlier_sentence_ng_retake(text_a, text_b) or is_earlier_sentence_ng_retake(text_b, text_a):
+        return True
+    na = normalize_text(text_a)
+    nb = normalize_text(text_b)
+    if len(na) >= 4 and len(nb) >= 4 and na[:4] == nb[:4]:
+        return True
+    return False
+
+
+def _backtrack_before_retake_cluster(
+    whisper_units: list[dict],
+    candidate_idx: int,
+    min_idx: int,
+) -> int:
+    """
+    Backtrack the split index so that a retake cluster is never split across two chunks.
+
+    ASD-STE100:
+    This function checks if sentences after the split repeat sentences before the split.
+    If a repeat exists, it moves the split index backward before the first take.
+    """
+    idx = candidate_idx
+    while idx > min_idx:
+        after_slice = whisper_units[idx + 1 : min(len(whisper_units), idx + 5)]
+        before_start = max(min_idx, idx - 4)
+        earliest_overlap_idx = None
+
+        for b_idx in range(before_start, idx + 1):
+            b_text = whisper_units[b_idx].get("text", "")
+            for a_unit in after_slice:
+                a_text = a_unit.get("text", "")
+                if _are_sentences_retake_related(b_text, a_text):
+                    earliest_overlap_idx = b_idx
+                    break
+            if earliest_overlap_idx is not None:
+                break
+
+        if earliest_overlap_idx is not None and earliest_overlap_idx > min_idx:
+            # Step back to the sentence immediately before Take 1 of the retake cluster
+            idx = earliest_overlap_idx - 1
+        else:
+            break
+
+    return idx
+
+
+def detect_chunk_boundaries(
+    whisper_units: list[dict],
+    total_duration: float,
+    target_chunk_duration: float = 480.0,
+    min_pause_duration: float = 2.0,
+    max_chunk_duration: float = 660.0,
+    window_start: float | None = None,
+) -> list[tuple[float, float, list[dict]]]:
+    """
+    Split the timeline into logical chunks at natural speech pauses (>= 2.0s).
+    Backtracks before any retake cluster so Take 1 and Take N stay in the same chunk.
+
+    ASD-STE100:
+    This function finds pauses between spoken sentences.
+    It groups sentences into chunks between 6 and 11 minutes long.
+
+    Returns:
+        List of tuples: (chunk_start_sec, chunk_end_sec, chunk_sentences)
+    """
+    if not whisper_units:
+        start_t = 0.0 if window_start is None else window_start
+        return [(start_t, total_duration, [])]
+
+    first_unit_start = float(whisper_units[0].get("start", 0.0))
+    chunk_start = window_start if window_start is not None else (0.0 if first_unit_start < 30.0 else max(0.0, first_unit_start - 5.0))
+    effective_span = total_duration - chunk_start
+
+    if effective_span <= max_chunk_duration:
+        return [(chunk_start, total_duration, whisper_units)]
+
+    chunks = []
+    start_idx = 0
+    n_units = len(whisper_units)
+
+    while start_idx < n_units:
+        # Check if remaining duration fits in a single final chunk
+        if (total_duration - chunk_start) <= max_chunk_duration:
+            chunks.append((chunk_start, total_duration, whisper_units[start_idx:]))
+            break
+
+        split_idx = None
+        min_backtrack_idx = start_idx
+
+        for i in range(start_idx, n_units - 1):
+            s_curr_end = float(whisper_units[i].get("end", 0.0))
+            chunk_elapsed = s_curr_end - chunk_start
+            if chunk_elapsed >= target_chunk_duration * 0.65 and min_backtrack_idx == start_idx:
+                min_backtrack_idx = i
+
+            s_next_start = float(whisper_units[i + 1].get("start", 0.0))
+            pause = s_next_start - s_curr_end
+
+            if chunk_elapsed >= target_chunk_duration and pause >= min_pause_duration:
+                safe_idx = _backtrack_before_retake_cluster(whisper_units, i, min_backtrack_idx)
+                safe_pause = float(whisper_units[safe_idx + 1].get("start", 0.0)) - float(whisper_units[safe_idx].get("end", 0.0))
+                if safe_idx == i or safe_pause >= 0.40:
+                    split_idx = safe_idx
+                    break
+
+            if chunk_elapsed >= max_chunk_duration:
+                # Backtrack within [min_backtrack_idx, i] to find the largest non-retake pause
+                best_idx = i
+                best_score = -1.0
+                search_start = max(start_idx + 1, min_backtrack_idx)
+                for cand in range(search_start, i + 1):
+                    safe_cand = _backtrack_before_retake_cluster(whisper_units, cand, search_start)
+                    cand_pause = (
+                        float(whisper_units[safe_cand + 1].get("start", 0.0))
+                        - float(whisper_units[safe_cand].get("end", 0.0))
+                    )
+                    if cand_pause > best_score:
+                        best_score = cand_pause
+                        best_idx = safe_cand
+                split_idx = best_idx
+                break
+
+        if split_idx is None or split_idx >= n_units - 1:
+            chunks.append((chunk_start, total_duration, whisper_units[start_idx:]))
+            break
+
+        s_curr_end = float(whisper_units[split_idx].get("end", 0.0))
+        s_next_start = float(whisper_units[split_idx + 1].get("start", 0.0))
+        pause = max(0.0, s_next_start - s_curr_end)
+        split_point = round(s_curr_end + (pause / 2.0), 2)
+
+        chunk_sentences = whisper_units[start_idx : split_idx + 1]
+        chunks.append((chunk_start, split_point, chunk_sentences))
+
+        chunk_start = split_point
+        start_idx = split_idx + 1
+
+    return chunks
+
+

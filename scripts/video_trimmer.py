@@ -31,6 +31,7 @@ except ImportError as e:
     logging.error("請先執行: pip install -r requirements.txt")
     sys.exit(1)
 
+import math
 import os
 from .acoustic import refine_speech_bounds_locked
 from .constants import ALLOWED_INPUT_EXTENSIONS
@@ -41,18 +42,39 @@ from .gemini_client import (
     build_prompt,
     get_gemini_client,
     load_env_file,
+    merge_chunked_edl,
     run_gemini_inference,
     stage_video_to_gcs,
 )
 from .render import probe_video, render_cut_video
 from .transcribe import (
     align_clip_with_whisper,
+    calculate_active_script_window,
+    detect_chunk_boundaries,
     is_earlier_sentence_ng_retake,
     resolve_clip_sub_units,
     transcribe_video_whisper,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_gemini_json_text(raw_json: str) -> dict:
+    """Clean markdown fences and parse JSON returned by Gemini."""
+    cleaned = (raw_json or "").strip()
+    if "```json" in cleaned:
+        cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+    elif "```" in cleaned:
+        cleaned = cleaned.split("```")[1].split("```")[0].strip()
+    elif not cleaned.startswith("{") and "{" in cleaned:
+        start_idx = cleaned.find("{")
+        end_idx = cleaned.rfind("}")
+        if start_idx != -1 and end_idx != -1:
+            cleaned = cleaned[start_idx : end_idx + 1].strip()
+    try:
+        return json.loads(cleaned)
+    except Exception as e:
+        raise VideoTrimmerError(f"解析 Gemini JSON 失敗: {e}\n原始回傳內容:\n{cleaned}") from e
 
 
 def _setup_logging(verbose):
@@ -150,7 +172,35 @@ def _run(args):
             Path(__file__).parent / "video-trimmer" / "prompts" / "video_cut_prompt.md",
         ]
         script_path = Path(args.script).resolve() if args.script else None
-        prompt = build_prompt(prompt_candidates, script_path=script_path, whisper_units=whisper_units)
+
+        # Step 3a: 若提供講稿且影片為長素材，先依據講稿語意句子定位有效視訊視窗
+        win_start, win_end, active_units = 0.0, total_dur, whisper_units
+        if script_path is not None and script_path.exists() and total_dur > 600.0 and whisper_units:
+            script_text = script_path.read_text(encoding="utf-8")
+            win_start, win_end, active_units = calculate_active_script_window(
+                whisper_units=whisper_units,
+                script_text=script_text,
+                total_duration=total_dur,
+                padding_seconds=20.0,
+            )
+            if win_start > 0.0 or win_end < total_dur:
+                logger.info(
+                    "    [講稿視窗鎖定] 自動聚焦有效拍攝區間: %.1fs ~ %.1fs (跨度 %.1fs, 台詞 %d 句)",
+                    win_start,
+                    win_end,
+                    win_end - win_start,
+                    len(active_units),
+                )
+
+        # Step 3b: 若有效區間超過 11 分鐘 (660s)，於自然停頓處 (>=2.0s) 自動切塊並避免切開重講群組
+        chunks = detect_chunk_boundaries(
+            whisper_units=active_units,
+            total_duration=win_end,
+            target_chunk_duration=480.0,
+            min_pause_duration=2.0,
+            max_chunk_duration=660.0,
+            window_start=win_start,
+        )
 
         resolved_bucket = (
             args.bucket
@@ -167,11 +217,60 @@ def _run(args):
         mode_str = "🤖 Agentic Video Understanding (動態影格探索模式)" if args.agentic else "📺 Static Multimodal (靜態抽幀)"
         logger.info("==> 4. 調用 %s [模式: %s] 結合 Whisper 劇本進行文字剪輯與選鏡決策...", args.model, mode_str)
 
+        usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
+        duration = 0.0
+        chunk_edl_results = []
+
         try:
-            raw_json, usage, duration = run_gemini_inference(client, types, args.model, gcs_uri, mime_type, prompt, args.agentic)
+            if len(chunks) > 1:
+                logger.info("    [長片自動分段] 有效跨度 %.1fs 分割為 %d 個自然停頓區段依序推論...", win_end - win_start, len(chunks))
+
+            for idx, (c_start, c_end, c_units) in enumerate(chunks, start=1):
+                c_prompt = build_prompt(prompt_candidates, script_path=script_path, whisper_units=c_units)
+                use_window_meta = (c_start > 0.0) or (c_end < total_dur - 1.0) or (len(chunks) > 1)
+                start_offset = f"{int(c_start)}s" if use_window_meta else None
+                end_offset = f"{int(math.ceil(c_end))}s" if use_window_meta else None
+
+                if len(chunks) > 1:
+                    logger.info(
+                        "    ---> Chunk %d/%d: 視訊區間 %s ~ %s (%.1fs, %d 句台詞)",
+                        idx,
+                        len(chunks),
+                        start_offset,
+                        end_offset,
+                        c_end - c_start,
+                        len(c_units),
+                    )
+
+                c_raw_json, c_usage, c_dur = run_gemini_inference(
+                    client,
+                    types,
+                    args.model,
+                    gcs_uri,
+                    mime_type,
+                    c_prompt,
+                    args.agentic,
+                    num_sentences=max(1, len(c_units)),
+                    video_duration=max(10.0, c_end - c_start),
+                    start_offset=start_offset,
+                    end_offset=end_offset,
+                )
+                duration += c_dur
+                for k in usage:
+                    usage[k] += c_usage.get(k, 0)
+
+                chunk_edl_results.append(_parse_gemini_json_text(c_raw_json))
         finally:
             if is_ephemeral and not args.keep_gcs_upload:
                 delete_gcs_blob(gcs_uri)
+
+        if len(chunk_edl_results) == 1:
+            model_edl = chunk_edl_results[0]
+        else:
+            model_edl = merge_chunked_edl(
+                chunk_edl_results,
+                project_title=f"{base_name} AI Video Trimmer ({tag})",
+            )
 
         logger.info("    模型推論完成 (耗時 %.1f 秒)！", duration)
         logger.info("    📊 Token 統計: 輸入=%s | 輸出=%s | 思維=%s | 工具探索=%s | 總計=%s",
@@ -189,22 +288,6 @@ def _run(args):
             "total_tokens": usage["total_tokens"]
         }
         _append_usage_log(out_dir, video_path, args.model, usage, mode, duration)
-
-        raw_json = raw_json.strip()
-        if "```json" in raw_json:
-            raw_json = raw_json.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_json:
-            raw_json = raw_json.split("```")[1].split("```")[0].strip()
-        elif not raw_json.startswith("{") and "{" in raw_json:
-            start_idx = raw_json.find("{")
-            end_idx = raw_json.rfind("}")
-            if start_idx != -1 and end_idx != -1:
-                raw_json = raw_json[start_idx:end_idx + 1].strip()
-
-        try:
-            model_edl = json.loads(raw_json)
-        except Exception as e:
-            raise VideoTrimmerError(f"解析 Gemini JSON 失敗: {e}\n原始回傳內容:\n{raw_json}") from e
 
     # 第三階段：比照字幕邏輯——文字剪輯時間鎖定、句間空白剔除與 Last-Take-Wins 句子過濾
     logger.info("==> 5. 執行文字剪輯時間鎖定與句間空白/NG 剔除 (Text-Based Sub-Clip Locking)...")
