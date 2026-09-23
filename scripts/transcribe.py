@@ -43,11 +43,81 @@ def _compute_sentence_speaker(sentence):
             sentence['speaker_id'] = max(spk_counts.items(), key=lambda x: x[1])[0]
 
 
+FILLER_PREFIXES = (
+    "那麼", "那", "其實", "然後", "而且",
+    "好", "來", "對", "就是", "所以",
+    "OK", "ok", "現在", "另外",
+)
+
+
+def strip_filler_words(text: str) -> str:
+    """
+    Remove common spoken filler prefixes and non-alphanumeric characters.
+    ASD-STE100: Use plain normalized string output.
+    """
+    cleaned = re.sub(r"^[^\w一-鿿]+", "", text or "").strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in FILLER_PREFIXES:
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix) :].lstrip("，,、 　")
+                changed = True
+                break
+    return re.sub(r"[^\w一-鿿]", "", cleaned).lower()
+
+
+def is_fuzzy_prefix_restart(
+    curr_text: str,
+    next_text: str,
+    similarity_threshold: float = 0.70,
+    min_common_chars: int = 4,
+) -> bool:
+    """
+    Detect if next_text restarts the opening clause of curr_text.
+    Tolerate ASR homophone drift, filler particles, and truncated false starts.
+    ASD-STE100: Return True when restart detected, else False.
+    """
+    c_clean = strip_filler_words(curr_text)
+    n_clean = strip_filler_words(next_text)
+
+    if len(c_clean) < 3 or len(n_clean) < 3:
+        return False
+
+    # Extract opening anchors (window of 6 to 14 characters)
+    window_len = min(14, max(6, len(n_clean)))
+    c_head = c_clean[:window_len]
+    n_head = n_clean[:window_len]
+
+    # 1. Exact common prefix of length >= min_common_chars
+    anchor_len = min(min_common_chars, len(c_head), len(n_head))
+    if anchor_len >= 3 and c_head[:anchor_len] == n_head[:anchor_len]:
+        return True
+
+    # 2. Substring containment between opening clauses (restrict c_head match to opening of n_head)
+    if len(c_head) >= min_common_chars and c_head[:min_common_chars] in n_head[: min_common_chars + 3]:
+        return True
+    if len(n_head) >= min_common_chars and n_head[:min_common_chars] in c_clean:
+        return True
+
+    # 3. Fuzzy SequenceMatcher comparison (handles homophones like 知識 vs 姿態)
+    compare_len = min(len(c_head), len(n_head))
+    if compare_len >= 4:
+        ratio = difflib.SequenceMatcher(None, c_head[:compare_len], n_head[:compare_len]).ratio()
+        if ratio >= similarity_threshold:
+            return True
+
+    return False
+
+
 def is_earlier_sentence_ng_retake(prev_text: str, next_text: str) -> bool:
     """
     判定前一個語意單元 (prev_text) 是否為後一個語意單元 (next_text) 的 NG 重講前綴或半截廢話。
     同時容忍句尾最後 1~2 個字因吃螺絲產生的同音錯字（例如「細微摔」vs「細微衰減」）。
     """
+    if is_fuzzy_prefix_restart(prev_text, next_text):
+        return True
+
     p_norm = normalize_text(prev_text)
     n_norm = normalize_text(next_text)
     if len(p_norm) < 3 or len(n_norm) < 3:
@@ -72,9 +142,8 @@ def is_earlier_sentence_ng_retake(prev_text: str, next_text: str) -> bool:
 
 def _split_sentence_on_paused_restarts(sentence_data: dict, min_pause_sec: float = 0.18) -> list[dict]:
     """
-    僅在單字與單字之間存在「真實物理停頓 (gap >= min_pause_sec)」的前提下，
-    若停頓後的詞語重啟了前面剛講過的開頭（>= 3 字），則於該物理停頓處切分為獨立 Sentence。
-    嚴禁在無物理停頓的連音處切割，確保 100% 聲學安全。
+    若單字與單字之間存在物理停頓 (gap >= min_pause_sec)、或 Whisper 將停頓吸收進拉長字詞 (>= 1.0s)、
+    或句中重啟了前面剛講過的子句開頭，則於該詞邊界切分為獨立 Sentence。
     """
     words = sentence_data.get("words", [])
     if len(words) < 6:
@@ -85,17 +154,25 @@ def _split_sentence_on_paused_restarts(sentence_data: dict, min_pause_sec: float
 
     for j in range(1, len(words)):
         gap = float(words[j].get("start", 0.0)) - float(words[j - 1].get("end", 0.0))
-        if gap < min_pause_sec:
-            continue
+        word_dur = float(words[j].get("end", 0.0)) - float(words[j].get("start", 0.0))
+        prev_word_dur = float(words[j - 1].get("end", 0.0)) - float(words[j - 1].get("start", 0.0))
 
-        prev_text = "".join(w.get("word", "") for w in words[seg_start_idx:j]).strip()
-        rem_text = "".join(w.get("word", "") for w in words[j : min(len(words), j + 18)]).strip()
-        prev_norm = normalize_text(prev_text)
-        rem_norm = normalize_text(rem_text)
+        has_acoustic_pause = (gap >= min_pause_sec) or (word_dur >= 1.0) or (prev_word_dur >= 1.0)
 
-        if len(prev_norm) >= 3 and len(rem_norm) >= 3:
-            # 檢查停頓後的開頭 3 字是否重現了前一段的開頭或子句前綴
-            if rem_norm[:3] in prev_norm:
+        if has_acoustic_pause or (j >= 4):
+            prev_text = "".join(w.get("word", "") for w in words[seg_start_idx:j]).strip()
+            rem_text = "".join(w.get("word", "") for w in words[j : min(len(words), j + 18)]).strip()
+            if is_fuzzy_prefix_restart(prev_text, rem_text, similarity_threshold=0.75):
+                split_word_indices.append(j)
+                seg_start_idx = j
+                continue
+
+        if gap >= min_pause_sec:
+            prev_text = "".join(w.get("word", "") for w in words[seg_start_idx:j]).strip()
+            rem_text = "".join(w.get("word", "") for w in words[j : min(len(words), j + 18)]).strip()
+            prev_norm = normalize_text(prev_text)
+            rem_norm = normalize_text(rem_text)
+            if len(prev_norm) >= 3 and len(rem_norm) >= 3 and rem_norm[:3] in prev_norm:
                 split_word_indices.append(j)
                 seg_start_idx = j
 
@@ -166,17 +243,19 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.45, max_sentence_dur
         curr_text = curr['text'].strip()
         dur = s_end - curr['start']
 
-        # 檢查新片段是否為前一段的重講（重複前綴或高相似度）
+        # Check if incoming segment is a retake restart of the current sentence
         is_retake_restart = (
-            is_earlier_sentence_ng_retake(curr_text, s_text)
+            is_fuzzy_prefix_restart(curr_text, s_text)
+            or is_fuzzy_prefix_restart(last_seg_text, s_text)
+            or is_earlier_sentence_ng_retake(curr_text, s_text)
             or is_earlier_sentence_ng_retake(last_seg_text, s_text)
         )
 
         should_split = False
-        # 0. 若偵測到重講重啟，強制切分為獨立 Sentence ID
+        # Rule 0: Force split unconditionally on retake restart
         if is_retake_restart:
             should_split = True
-        # 1. 物理換氣/停頓明顯 (gap >= max_gap)
+        # Rule 1: Physical respiration pause (gap >= max_gap)
         elif gap >= max_gap:
             should_split = True
         # 2. 句子長度已很長且有適度微停頓
