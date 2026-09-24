@@ -85,14 +85,18 @@ video-trimmer/
 
 ## Standard Agent Workflow (Autonomous Pipeline Execution)
 
-When Antigravity, Claude Code, Cursor, or any compatible agent is instructed by the user to rough-cut or trim a raw video, follow this protocol:
+When an AI agent is instructed to rough-cut or trim a raw video, follow this protocol directly.
+Resolve `<PLUGIN_ROOT>` as the repository or plugin root located two levels above `skills/video-trimmer/SKILL.md` (`../../`, for example `/Users/sylph/.gemini/config/plugins/video-trimmer`).
+Set the command working directory (`Cwd`) to `<PLUGIN_ROOT>` and invoke `python3 video_trimmer.py` directly. Do not search the filesystem with `find_by_name` or `list_dir` to locate the CLI entrypoint.
 
 ### Step 1: Environment Verification & GCP Native Setup
-Ensure FFmpeg is installed and Google Cloud resources are provisioned (100% native gcloud, zero Terraform):
+Run a single pre-flight check in `<PLUGIN_ROOT>` to verify that FFmpeg and `.env` configuration exist:
 ```bash
-# 1. Verify FFmpeg
-ffmpeg -version
-
+# 1. Pre-flight verification (FFmpeg + .env configuration)
+ffmpeg -version >/dev/null && test -f .env && echo "Environment Ready"
+```
+If `.env` is missing or Google Cloud credentials are not configured, run or instruct the user to run the one-click native `gcloud` setup:
+```bash
 # 2. Authenticate once with Google Cloud ADC
 gcloud auth application-default login
 
@@ -105,23 +109,23 @@ gcloud auth application-default login
 Default execution uses fast Static Multimodal mode (`MEDIA_RESOLUTION_LOW`). Pass `--agentic` only when the user explicitly requests Agentic Video Understanding.
 
 ```bash
-# Standard automatic rough-cut (Static Multimodal by default):
-video-trimmer -i "/path/to/raw_footage.mp4"
+# Standard automatic rough-cut (Static Multimodal by default, Cwd = <PLUGIN_ROOT>):
+python3 video_trimmer.py -i "/path/to/raw_footage.mp4"
 
-# If production shooting script is provided (Highly recommended for structured shows):
-video-trimmer -i "raw_footage.mp4" --script "shooting_script.md"
+# If production shooting script is provided (Recommended for structured recordings):
+python3 video_trimmer.py -i "/path/to/raw_footage.mp4" --script "/path/to/shooting_script.md"
 
-# Fast-paced YouTube tech / science explainer pacing:
-video-trimmer -i "raw_footage.mp4" --pacing compact
+# Fast-paced explainer pacing:
+python3 video_trimmer.py -i "/path/to/raw_footage.mp4" --pacing compact
 
-# Static Multimodal fallback (Use ONLY when the user explicitly requests static mode):
-video-trimmer -i "raw_footage.mp4"
+# Explicit output directory:
+python3 video_trimmer.py -i "/path/to/raw_footage.mp4" --script "/path/to/shooting_script.md" -o "/path/to/output_dir"
 ```
 
 ### Step 3: Fast Local Iteration (Cached EDL Workflow)
 To adjust pacing, fine-tune margins, or re-render without re-incurring cloud API inference:
 ```bash
-video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "fine_tuned"
+python3 video_trimmer.py -i "/path/to/raw_footage.mp4" --cached-json "/path/to/raw_footage_static_edl.json" --suffix "fine_tuned"
 ```
 
 ---
@@ -129,7 +133,7 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 ## CLI Options Reference
 
 | Option | Flag | Default | Description |
-| :--- | :---: | :---: | :--- |
+| :--- | :---: | :--- | :--- |
 | `--input` | `-i` | *(Required)* | Path to input raw video file (`.mp4`, `.mov`). |
 | `--output-dir` | `-o` | Same as video | Directory to save all generated output files. |
 | `--model` | `-m` | `gemini-3.8-flash` | Gemini model name (defaults to `$MODEL_NAME` or `gemini-3.8-flash`). |
@@ -150,13 +154,13 @@ video-trimmer -i "take 1.mp4" --cached-json "take 1_agentic_edl.json" --suffix "
 
 ## Output Deliverables
 
-For an input file `video.mp4`, the skill generates:
-1. `video_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 15ms micro-fades.
-2. `video_<suffix>_edl.xml`: Final Cut Pro 7 XML timeline for **Premiere Pro** & **DaVinci Resolve**.
-3. `video_<suffix>_edl.fcpxml`: FCPXML timeline for **Final Cut Pro X**.
-4. `video_<suffix>_edl.json`: Structured decision metadata with per-clip CPS and margins.
-5. `video_<suffix>_edl.csv`: Spreadsheet table with visual/audio validation notes.
-6. `video_whisper_sentences.json`: Word-level semantic sentence transcript cache.
+For an input file `raw_footage.mp4`, the skill generates:
+1. `raw_footage_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 15ms micro-fades.
+2. `raw_footage_<suffix>_edl.xml`: Final Cut Pro 7 XML timeline for **Premiere Pro** & **DaVinci Resolve**.
+3. `raw_footage_<suffix>_edl.fcpxml`: FCPXML timeline for **Final Cut Pro X**.
+4. `raw_footage_<suffix>_edl.json`: Structured decision metadata with per-clip CPS and margins.
+5. `raw_footage_<suffix>_edl.csv`: Spreadsheet table with visual/audio validation notes.
+6. `raw_footage_whisper_sentences.json`: Word-level semantic sentence transcript cache.
 
 ---
 
@@ -164,15 +168,14 @@ For an input file `video.mp4`, the skill generates:
 
 [MIT License](LICENSE) © 2026 sylphlin
 
-
 ---
 
-## ☁️ Google Drive Direct Link & GCS Smart Caching (ADC)
+## Google Drive Direct Link & GCS Smart Caching (ADC)
 
 `video-trimmer` natively supports passing Google Drive file links (`https://drive.google.com/file/d/.../view` or `gdrive://...`) directly to `-i / --input`:
 - Authenticated 100% via Application Default Credentials (`gcloud auth application-default login`).
 - Automatically checks remote MD5 (`md5Checksum`) to cache locally in `<output_dir>/gdrive_inputs/` and checks `sha256` / `gdrive_md5` metadata on `gs://${VIDEO_TRIMMER_BUCKET}/raw/` to skip redundant GCS uploads.
 - Example:
   ```bash
-  python3 video_trimmer.py -i "https://drive.google.com/file/d/YOUR_VIDEO_FILE_ID/view?usp=sharing" --agentic -o output/
+  python3 video_trimmer.py -i "https://drive.google.com/file/d/YOUR_VIDEO_FILE_ID/view?usp=sharing" -o output/
   ```
