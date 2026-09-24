@@ -33,6 +33,13 @@ except ImportError as e:
 
 import math
 import os
+
+if __package__ in (None, ""):
+    _skill_root = Path(__file__).resolve().parent.parent
+    if str(_skill_root) not in sys.path:
+        sys.path.insert(0, str(_skill_root))
+    __package__ = "scripts"
+
 from .acoustic import refine_speech_bounds_locked
 from .constants import ALLOWED_INPUT_EXTENSIONS
 from .exceptions import InvalidInputError, VideoTrimmerError
@@ -165,11 +172,13 @@ def _run(args):
         load_env_file()
         client = get_gemini_client(project_id=args.project, location=args.region)
 
+        _resolved_file = Path(__file__).resolve()
         prompt_candidates = [
             Path(__file__).parent / "prompts" / "video_cut_prompt.md",
             Path(__file__).parent.parent / "prompts" / "video_cut_prompt.md",
             Path.cwd() / "prompts" / "video_cut_prompt.md",
             Path(__file__).parent / "video-trimmer" / "prompts" / "video_cut_prompt.md",
+            *[p / "prompts" / "video_cut_prompt.md" for p in _resolved_file.parents[:5]],
         ]
         script_path = Path(args.script).resolve() if args.script else None
 

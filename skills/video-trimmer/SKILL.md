@@ -28,8 +28,23 @@ video-trimmer/
 │   └── AGENTS.md                     # Strict read-only & fail-fast operational invariants for AI clients
 ├── skills/
 │   └── video-trimmer/
-│       └── SKILL.md                  # Skill definition and agent reference manual
-├── AGENTS.md                         # Permanent project invariants & developer rules (ASD-STE100 English)
+│       ├── SKILL.md                  # Skill definition and agent reference manual
+│       ├── scripts/                  # Canonical core implementation modules (SSOT)
+│       │   ├── __init__.py
+│       │   ├── video_trimmer.py      # Master rough-cut orchestrator & acoustic engine
+│       │   ├── constants.py          # Centrally managed named constants
+│       │   ├── exceptions.py         # Custom exception hierarchy
+│       │   ├── acoustic.py           # CPS calculation & text-locked acoustic bounds
+│       │   ├── transcribe.py         # Whisper transcription, clause segmentation, cross-clip coalescing
+│       │   ├── gemini_client.py      # Vertex AI (ADC) client & multimodal inference
+│       │   ├── gcs_utils.py          # Google Cloud Storage upload & ephemeral cleanup
+│       │   ├── exporters.py          # FCP7 XML / FCPXML / CSV generation
+│       │   └── render.py             # ffprobe inspection & ffmpeg final render
+│       └── prompts/                  # Canonical multimodal prompting specifications (SSOT)
+│           └── video_cut_prompt.md   # Dual-mode take arbitration & 5-rule subtraction prompt
+├── scripts -> skills/video-trimmer/scripts  # Root POSIX symlink for CLI & test compatibility
+├── prompts -> skills/video-trimmer/prompts  # Root POSIX symlink for prompt resolution
+├── AGENTS.md                         # Workspace & engineering development rules (ASD-STE100 English)
 ├── README.md                         # Public GitHub README documentation
 ├── LICENSE                           # MIT License
 ├── .env.example                      # Environment variables template for Vertex AI & GCS
@@ -37,20 +52,7 @@ video-trimmer/
 ├── pyproject.toml                    # Standard Python packaging & CLI console scripts
 ├── requirements.txt                  # Python runtime dependencies
 ├── video_trimmer.py                  # Primary CLI entrypoint forwarder
-├── scripts/                          # Core implementation modules
-│   ├── __init__.py
-│   ├── video_trimmer.py              # Master rough-cut orchestrator & acoustic engine
-│   ├── constants.py                  # Centrally managed named constants
-│   ├── exceptions.py                 # Custom exception hierarchy
-│   ├── acoustic.py                   # CPS calculation & text-locked acoustic bounds
-│   ├── transcribe.py                 # Whisper transcription, sentence merge, clip alignment
-│   ├── gemini_client.py              # Vertex AI (ADC) client & multimodal inference
-│   ├── gcs_utils.py                  # Google Cloud Storage upload & ephemeral cleanup
-│   ├── exporters.py                  # FCP7 XML / FCPXML / CSV generation
-│   └── render.py                     # ffprobe inspection & ffmpeg final render
-├── tests/                            # Offline unit tests
-└── prompts/                          # Multimodal prompting specifications
-    └── video_cut_prompt.md           # 5-rule subtraction & take selection prompt
+└── tests/                            # Offline unit tests
 ```
 
 ---
@@ -61,14 +63,15 @@ video-trimmer/
    - Eliminates fragile text-only editing.
    - Stages raw footage directly to Google Cloud Storage (GCS) with automatic ephemeral lifecycle cleanup.
    - Evaluates presenter eye contact, facial expressions, stuttering, and retakes simultaneously via Vertex AI.
-2. **"Last Take Wins" Semantic Selection**:
-   - Automatically detects presenter mistakes, line rehearsals, or multiple retakes of the same section, keeping strictly the final successful take.
+2. **Dual-Mode Take Arbitration (Mode A Script-Anchored & Mode B Unscripted Intent-Window)**:
+   - **Mode A (`--script`)**: Monotonic `[Script Block NN]` alignment keeping at most one winning take per script block.
+   - **Mode B (No `--script`)**: Unscripted Intent-Window arbitration pruning abandoned fragments while preserving intentional rhetorical repetition.
 3. **Multimodal Active Speaker Diarization (Gemini 3.8 Flash)**:
    - Evaluates on-camera visual cues (camera gaze, mouth articulatory sync, body language) and audio acoustics (close lavalier mic vs distant room echo).
    - Accurately differentiates the on-screen target host from off-screen crew shouting section cues (e.g. "Action", "CTA-S2", "CDA84") and casual blooper chatter between takes, eliminating cumbersome local diarization models while maintaining flawless role separation.
-4. **Word-Level Acoustic Ground Truth Locking**:
-   - Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA) extracts phoneme-aligned word timestamps.
-   - Every cut boundary is physically anchored to acoustic reality rather than LLM timestamp approximations.
+4. **Word-Level Acoustic Ground Truth & Global Cross-Clip Coalescing**:
+   - Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA) extracts phoneme-aligned word timestamps segmented purely on physical breath pauses and punctuation closure.
+   - Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`) automatically merges consecutive `Sentence ID`s across adjacent clips when `gap < 0.40s`, eliminating artificial internal jump-cuts.
 5. **Acoustic Onset Snapping (Smart Gap Shortening)**:
    - Scans the pre-speech dead air to snap cut-ins precisely **80ms before vocal cord vibration**, eliminating awkward pre-speech dead air and post-slate pauses.
 6. **Word Ground Truth Tail & Plosive Defense**:
@@ -87,7 +90,7 @@ video-trimmer/
 
 When an AI agent is instructed to rough-cut or trim a raw video, follow this protocol directly.
 Resolve `<PLUGIN_ROOT>` as the repository or plugin root located two levels above `skills/video-trimmer/SKILL.md` (`../../`, for example `/Users/sylph/.gemini/config/plugins/video-trimmer`).
-Set the command working directory (`Cwd`) to `<PLUGIN_ROOT>` and invoke `python3 video_trimmer.py` directly. Do not search the filesystem with `find_by_name` or `list_dir` to locate the CLI entrypoint.
+Set the command working directory (`Cwd`) to `<PLUGIN_ROOT>` and invoke `python3 skills/video-trimmer/scripts/video_trimmer.py` (or `python3 video_trimmer.py`) directly. Do not search the filesystem with `find_by_name` or `list_dir` to locate the CLI entrypoint.
 
 ### Step 1: Environment Verification & GCP Native Setup
 Run a single pre-flight check in `<PLUGIN_ROOT>` to verify that FFmpeg and `.env` configuration exist:
@@ -110,22 +113,22 @@ Default execution uses fast Static Multimodal mode (`MEDIA_RESOLUTION_LOW`). Pas
 
 ```bash
 # Standard automatic rough-cut (Static Multimodal by default, Cwd = <PLUGIN_ROOT>):
-python3 video_trimmer.py -i "/path/to/raw_footage.mp4"
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4"
 
-# If production shooting script is provided (Recommended for structured recordings):
-python3 video_trimmer.py -i "/path/to/raw_footage.mp4" --script "/path/to/shooting_script.md"
+# If production shooting script is provided (Mode A - Monotonic Script-Anchored Alignment):
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --script "/path/to/shooting_script.md"
 
 # Fast-paced explainer pacing:
-python3 video_trimmer.py -i "/path/to/raw_footage.mp4" --pacing compact
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --pacing compact
 
 # Explicit output directory:
-python3 video_trimmer.py -i "/path/to/raw_footage.mp4" --script "/path/to/shooting_script.md" -o "/path/to/output_dir"
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --script "/path/to/shooting_script.md" -o "/path/to/output_dir"
 ```
 
 ### Step 3: Fast Local Iteration (Cached EDL Workflow)
 To adjust pacing, fine-tune margins, or re-render without re-incurring cloud API inference:
 ```bash
-python3 video_trimmer.py -i "/path/to/raw_footage.mp4" --cached-json "/path/to/raw_footage_static_edl.json" --suffix "fine_tuned"
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --cached-json "/path/to/raw_footage_static_edl.json" --suffix "fine_tuned"
 ```
 
 ---

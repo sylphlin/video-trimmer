@@ -1,102 +1,65 @@
-# Developer & Maintenance Operational Rules (AGENTS.md)
+# Video Trimmer — Workspace & Development Rules (AGENTS.md)
 
-This document serves as the project memory and permanent operational guidelines for the **Video Trimmer** codebase. All agents and developers must strictly adhere to these invariant rules across all future tasks and iterations.
-
----
-
-## 1. Multi-NLE Timeline Interoperability (Core Output Target)
-
-- **Universal NLE Support**: The primary purpose of this tool is to produce frame-accurate rough-cut timelines directly importable into major non-linear editing software (NLEs):
-  - Apple Final Cut Pro (`.fcpxml`)
-  - Adobe Premiere Pro (`.xml` via Final Cut Pro 7 XML interchange format)
-  - DaVinci Resolve (`.xml` / `.fcpxml`)
-  - CMX 3600 Edit Decision Lists (`.edl`)
-  - Universal CSV cut list (`.csv`)
-- **Timecode Accuracy**: Timecode calculations must support standard broadcast and cinema frame rates (23.976, 24, 25, 29.97, 30, 50, 59.94, 60 fps). Always respect non-drop frame / drop frame timecode specifications.
-- **Strict Verification**: Any changes to timeline exporters (`scripts/exporters.py`) must pass schema and unit test verifications against all supported NLE targets.
+This file defines the authoritative rules for AI Coding Agents (Google Antigravity / Jetski, Claude Code, Codex, etc.) working in this repository. It covers both **Client Execution Invariants** (when running the video trimming pipeline for end users) and **Repository Engineering Standards** (when developing, maintaining, or extending this project).
 
 ---
 
-## 2. Prompts and Python Code Strictly in ASD-STE100 English
+## Part I: Operational Invariants (When Executing Video Trimmer Tasks)
 
-- **ASD-STE100 Standard**: All prompt templates (`prompts/*.md`), docstrings, code comments, and CLI help messages MUST strictly follow **ASD-STE100 (Simplified Technical English)** principles:
-  - Use short, direct sentences (keep instructions below 20 words where possible).
-  - Use a restricted, controlled vocabulary with clear and unambiguous meanings.
-  - Use the imperative mood for instructions (e.g., "Do not cut", "Verify the output", "Calculate timecode").
-  - Maintain active voice; avoid passive voice, convoluted clauses, and vague adverbs.
-  - Give one instruction per sentence.
-- **English for Code Base**: All Python code (`*.py`), including variable names, class/function definitions, docstrings, comments, log output, error messages, and CLI help descriptions, MUST be written in professional, concise English adhering to ASD-STE100 principles.
-
----
-
-## 3. Strict Generality & Neutrality (Zero Specific Name / Video Hardcoding)
-
-- **Zero Entity Hardcoding**:
-  - Never introduce hardcoded logic, special branches, or regex rules tailored to specific video files, specific YouTube channels, or specific individuals.
-  - All trimming heuristics (last-take selection, silence stripping, speech-locking) must generalize across any presenter, show, or production style.
-- **Completely Generic Documentation**:
-  - Documentation (`README.md`, `SKILL.md`), scripts (`scripts/*.py`), test fixtures, and prompt templates must remain completely generic and production-ready.
-  - NEVER include test-specific video titles, specific presenter names, or ad-hoc local testing assets in repository files.
-- **Standard Placeholders Only**: Always use generic, standard placeholders in documentation and examples:
-  - Video files: `raw_footage.mp4`, `sample_take.mp4`
-  - Shooting scripts: `shooting_script.md`
-  - Output files: `rough_cut.fcpxml`, `rough_cut.xml`, `rough_cut.edl`
-  - Cloud storage buckets: `video-preprocessing-PROJECT_ID`
+1. **Strict Toolset Execution Only (No Ad-Hoc Scripts)**:
+   - Execute all video rough-cutting, take selection, acoustic onset snapping, NLE XML/FCPXML/EDL exporting, and video rendering exclusively via the official scripts in `skills/video-trimmer/scripts/` (symlinked at `scripts/` and `video_trimmer.py` at `<PLUGIN_ROOT>`).
+   - Writing temporary Python scripts, ad-hoc regex deduplication, or custom audio/video trimming logic is **STRICTLY FORBIDDEN**.
+2. **Mandatory 3-Step Gated Workflow (Direct CLI Invocation)**:
+   - Resolve `<PLUGIN_ROOT>` as two directory levels above `skills/video-trimmer/SKILL.md` (`../../`, e.g., `/Users/sylph/.gemini/config/plugins/video-trimmer`).
+   - Follow the 3-Step Runbook defined in [SKILL.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/SKILL.md):
+     - **Step 1 (Environment & Cloud Auth Verification)**: Verify FFmpeg, `gcloud` ADC credentials, and `.env` configuration (`GOOGLE_CLOUD_PROJECT`, `VIDEO_TRIMMER_BUCKET`) from `<PLUGIN_ROOT>`.
+     - **Step 2 (Pipeline Execution)**: Run `python3 skills/video-trimmer/scripts/video_trimmer.py` (or `python3 video_trimmer.py` with `Cwd` set to `<PLUGIN_ROOT>`) directly via `run_command`. Pass `-s <SCRIPT_FILE>` whenever the user provides a shooting script or outline (Mode A: Monotonic Script-Anchored Alignment); omit `-s` for unscripted recordings (Mode B: Unscripted Intent-Window Arbitration). Run in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) unless `--agentic` is explicitly requested.
+     - **Step 3 (Deliverable Verification)**: Verify that all required outputs (`.mp4`, `.fcpxml`, `.xml`, `.edl`, `.csv`, and `_edl_report.md`) exist on disk and are non-empty (`> 0 bytes`).
+3. **Fail-Fast & Exit Gate Verification**:
+   - If any script exits with a non-zero status (e.g., missing ADC credentials, 403/401 GCS/Vertex AI permission error, or missing FFmpeg), stop immediately, report the exact error and exit status, and instruct the user to run `./setup.sh --project YOUR_PROJECT_ID` or `gcloud auth application-default login`.
+   - Never declare completion until all required deliverable files exist on disk and are non-empty (`> 0 bytes`).
+4. **Dynamic Language Mirroring & Strict Zero-Emoji Policy**:
+   - Respond to the user in their prompt language (Traditional Chinese `zh-TW` when prompted in Traditional Chinese, English when prompted in English, Japanese when prompted in Japanese, etc.).
+   - Do NOT use decorative emojis or icons in section headings, tables, or generated EDL reports.
 
 ---
 
-## 4. Typography & Plain Text Formatting (Strict Zero-Emoji Policy)
+## Part II: Repository Development & Engineering Standards (When Developing This Project)
 
-- **No Emojis in Section Titles or Tables**: Under no circumstances should emojis or decorative icons (e.g., 🎬, ✂️, 📌, 💡, ⏱️, 🚀) be used in section headings (`## 1. `, `## 2. `, etc.), sub-headings, table headers, or structured logs.
-- **Executive Plain Text**: Maintain clean, professional, enterprise-grade Markdown typography.
+When modifying code, prompts, infrastructure scripts, or documentation in this repository, you MUST adhere to the following engineering standards:
 
----
+### 1. Single Source of Truth (SSOT) & Symlink Integrity (Agent Plugins 1.0 Specification)
+- **Canonical Code Location**: All core Python scripts (`scripts/*.py`) and prompt templates (`prompts/*.md`) physically reside inside `skills/video-trimmer/scripts/` and `skills/video-trimmer/prompts/` in compliance with the [Agent Plugins 1.0 Specification](https://agent-plugins.org/specification) (§4.2 & §7.1).
+- **Root Symlinks**: Top-level `scripts` and `prompts` at the repository root are POSIX symlinks pointing to `skills/video-trimmer/scripts` and `skills/video-trimmer/prompts` (§4.1.3).
+- **Rule**: Always edit files under `skills/video-trimmer/scripts/` and `skills/video-trimmer/prompts/`. Never replace root symlinks with duplicate physical directories.
 
-## 5. Architectural Invariants
+### 2. 4-Layer Unified Architecture & Zero Semantic String-Matching Invariant
+- **Zero Python Semantic Retake Guessing**: Never use Python string-similarity heuristics (`difflib`, character overlap ratios, or regex keyword matching) in [transcribe.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/transcribe.py) to classify semantic retakes or filter sentences. Semantic take arbitration belongs exclusively to the LLM in [video_cut_prompt.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/prompts/video_cut_prompt.md).
+- **Layer 1 — Pure Acoustic & Punctuation Clause Segmentation**:
+  - `merge_whisper_segments_to_sentences` and `_split_sentence_on_paused_restarts` in [transcribe.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/transcribe.py) split `Sentence ID` units purely on physical boundaries: breath pauses (`gap >= 0.20s`), stretched word onsets (`word_dur >= 1.20s` and `>= 0.45s/char`), punctuation closure, and speaker turns, while preserving `CONJUNCTIONS` attachment across micro-pauses (`gap < 0.25s`).
+- **Layer 2 — Dual-Mode LLM Take Arbitration**:
+  - [gemini_client.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/gemini_client.py) and [video_cut_prompt.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/prompts/video_cut_prompt.md) support **Mode A** (Monotonic Script-Anchored Alignment via `[Script Block NN]`, max one winning take per block) and **Mode B** (Unscripted Intent-Window Arbitration, pruning abandoned fragments while preserving intentional rhetorical repetition).
+- **Layer 3 — Sub-Unit Expansion & Word-Boundary Trimming**:
+  - `resolve_clip_sub_units` and `_trim_matched_words_by_transcript` in [transcribe.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/transcribe.py) expand multi-sentence spans and trim word boundaries (`t_first`, `t_last`) to match `clip_data["transcript"]`.
+- **Layer 4 — Global Cross-Clip Coalescing**:
+  - `coalesce_adjacent_sub_units` in [transcribe.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/transcribe.py) merges consecutive `Sentence ID`s across adjacent clips when the physical inter-word gap is `< 0.40s` and no `Sentence ID` is skipped, eliminating artificial jump-cuts and redundant micro-fades inside continuous sentences.
 
-- **Runtime Dependencies**: The core engine is 100% Python 3.10+ and standard FFmpeg/ffprobe. Never introduce Node.js, npm, or heavy GUI framework dependencies into the runtime or workflow.
-- **Audio Pop Protection (15ms Micro-Crossfade)**:
-  - Every cut boundary rendered via FFmpeg must include a 15ms equal-power micro-fade (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=oqsin`) to prevent acoustic popping and DC-offset clicks between jump-cuts.
-- **Speech Boundary Tightening (`tighten_clip_to_speech`)**:
-  - Never truncate spoken phonemes or words.
-  - Dynamically calculate lead-in and lead-out margins based on presenter Characters Per Second (CPS).
-  - Preserve natural thinking pauses when spoken by the active presenter.
-- **Ephemeral Cloud Storage Staging**:
-  - Raw video files uploaded to Google Cloud Storage for Gemini multimodal reasoning must be staged under `gs://${BUCKET}/raw/` and deleted immediately after inference.
-  - The storage bucket must enforce a 2-day automatic lifecycle deletion rule as a safety backstop.
+### 3. Multi-NLE Timeline Interoperability & Acoustic Integrity
+- **Universal NLE Support**: [exporters.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/exporters.py) produces frame-accurate timelines for Apple Final Cut Pro (`.fcpxml`), Adobe Premiere Pro (`.xml`), DaVinci Resolve (`.xml` / `.fcpxml`), CMX 3600 (`.edl`), and CSV (`.csv`) across standard broadcast and cinema frame rates (`23.976` to `60` fps).
+- **Audio Pop Protection (`15ms` Equal-Power Micro-Crossfade)**: Every rendered cut boundary in [render.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/render.py) must apply a `15ms` equal-power micro-fade (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=oqsin`).
+- **Speech Boundary Tightening**: [acoustic.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/acoustic.py) dynamically calculates lead-in and lead-out margins from presenter CPS without truncating spoken phonemes.
 
----
+### 4. 100% Google Cloud Vertex AI (ADC) + GCS Architecture
+- **Designated Model & Zero API Key Policy**: All Gemini invocations in [gemini_client.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/gemini_client.py) use `genai.Client(vertexai=True, project=..., location=...)` via Application Default Credentials (ADC), defaulting to `MODEL_NAME=gemini-3.8-flash` and `GOOGLE_CLOUD_LOCATION=global`. Never introduce non-designated model IDs or legacy AI Studio API keys.
+- **GCS Infrastructure & Ephemeral Staging (`setup.sh`)**: Raw videos staged under `gs://${BUCKET}/raw/` are deleted in `finally` blocks after inference and backed by a 2-day bucket lifecycle deletion policy provisioned via [setup.sh](file:///Users/sylph/Documents/Antigravity/video-trimmer/setup.sh).
 
-## 6. Commit & Attribution Policy (Human Authorship Only)
+### 5. ASD-STE100 English, Strict Generality, & Unit Testing Gate
+- **ASD-STE100 & Zero Entity Hardcoding**: Write all Python code, docstrings, comments, and prompt templates in concise ASD-STE100 English. Use only generic placeholders (`raw_footage.mp4`, `shooting_script.md`, `rough_cut.fcpxml`) and never hardcode test-specific names or video titles.
+- **Mandatory Unit Test Gate**: Run the full unit test suite and verify 100% pass rate before committing any change:
+  ```bash
+  python3 -m unittest discover -s tests -v
+  ```
 
-- **No AI/Assistant Branding**: Never include any AI assistant name (e.g., "Claude", "Gemini", "Copilot") in branch names, commit messages, PR titles/descriptions, code comments, or file contents.
-- **No Co-Authorship Trailers**: Never append `Co-Authored-By`, session links, or any other AI-attribution trailer to commit messages or PR descriptions.
-- **Human Authorship Only**: All commits must be authored as the repository owner (`sylphlin <sylph.lin@gmail.com>`), with no secondary author line.
-
----
-
-## 7. Model Invariants & Single Source of Truth
-
-- **Designated Model Identifier**:
-  - The default multimodal model is `gemini-3.8-flash` via Vertex AI.
-  - The agent is strictly prohibited from altering, substituting, downgrading, or inventing any model identifiers outside the designated configuration in `.env` / `.env.example`.
-- **Dynamic Configuration via Environment Variables**:
-  - Models and project settings must always be loaded dynamically:
-    - `MODEL_NAME`: Designated multimodal reasoning model (default: `gemini-3.8-flash`)
-    - `GOOGLE_CLOUD_PROJECT`: Target Google Cloud Project ID
-    - `VIDEO_TRIMMER_BUCKET`: GCS staging bucket (default: `video-preprocessing-${PROJECT_ID}`)
-    - `GOOGLE_CLOUD_LOCATION`: Vertex AI location (default: `global`)
-- **Native gcloud Setup (`setup.sh`)**:
-  - Cloud infrastructure provisioning must remain 100% native `gcloud` via `setup.sh` (zero Terraform dependency, Cloud Shell ready).
-
----
-
-## 8. Fail-Fast & Explicit Engine Selection (Strict Zero Silent Fallback)
-
-- **Gemini Multimodal Reasoning as Primary Brain**:
-  - Gemini 3.8 Flash native video reasoning is the primary editor brain for take evaluation and cut decisions.
-  - Whisper acoustic transcription provides frame-accurate speech timestamps and acoustic ground truth.
-- **Fail-Fast on External Infrastructure & Auth Errors**:
-  - Whenever encountering external authentication (`401`, `RefreshError`), permission denials (`403 AccessDeniedException`), cloud storage, or quota errors, the agent MUST STOP IMMEDIATELY.
-  - Zero tolerance on blind retries, probing alternative buckets, or rewriting core logic.
-  - The agent must immediately report the blocked error and present the actionable fix to the human user, awaiting user direction.
+### 6. Antigravity Plugin Architecture, 5-Language Parity, & Commit Policy
+- **Plugin & README Synchronization**: Keep [plugin.json](file:///Users/sylph/Documents/Antigravity/video-trimmer/plugin.json), [rules/AGENTS.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/rules/AGENTS.md), [skills/video-trimmer/SKILL.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/SKILL.md), and all 5 language READMEs ([README.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/README.md), [README.zh-TW.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/README.zh-TW.md), [README.zh-CN.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/README.zh-CN.md), [README.ja.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/README.ja.md), [README.ko.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/README.ko.md)) synchronized at all times.
+- **Human Authorship Only**: Author all commits as `sylphlin <sylph.lin@gmail.com>` with zero AI assistant branding or `Co-Authored-By` trailers.

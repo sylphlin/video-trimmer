@@ -46,11 +46,13 @@ def _generate_content(client, **kwargs):
 
 def load_env_file():
     """載入 KEY=VALUE 設定（如 GOOGLE_CLOUD_PROJECT），依序尋找 ~/.gemini/.env、當前目錄與專案目錄 .env。"""
+    _resolved_file = Path(__file__).resolve()
     candidates = [
         Path.home() / ".gemini" / ".env",
         Path.cwd() / ".env",
         Path(__file__).parent / ".env",
         Path(__file__).parent.parent / ".env",
+        *[p / ".env" for p in _resolved_file.parents[:5]],
     ]
     for env_path in candidates:
         try:
