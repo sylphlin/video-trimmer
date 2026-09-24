@@ -11,17 +11,25 @@
 
 ## 概要 (Overview)
 
-**Video Trimmer** は、トーク動画、チュートリアル、プレゼンテーション録画向けの AI 自動ラフカット＆トリミングエンジンです。**Google Vertex AI Gemini 3.8 Flash** のマルチモーダル動画推論、**Whisper 単語レベル音響タイムスタンプ**（`mlx-whisper`）、および **音響オンセット・スナッピング** を組み合わせ、NG テイクや言い淀み、無音区間を自動除去し、NLE タイムライン（`.xml`, `.fcpxml`, `.edl`, `.csv`）と MP4 動画を出力します。
+**Video Trimmer** は、トーク動画、チュートリアル、プレゼンテーション録画向けの AI 自動ラフカット＆トリミングエンジンです。**Google Vertex AI Gemini 3.8 Flash** のマルチモーダル動画推論、**Whisper 単語レベル音響タイムスタンプ**（`mlx-whisper`）、**4 レイヤー統合アーキテクチャ**、および **音響オンセット・スナッピング** を組み合わせ、NG テイクや言い淀み、無音区間を自動除去しながら自然な連続発話を維持し、NLE タイムライン（`.xml`, `.fcpxml`, `.edl`, `.csv`）と MP4 動画を出力します。
 
 ---
 
-## 主な機能
+## 4 レイヤー統合アーキテクチャと主な機能
 
-1. **マルチモーダル動画推論 (`gemini-3.8-flash`)**：話者の視線、表情、言い直し、リテイクを同時に評価します。
-2. **Last-Take-Wins（最終成功テイクの採用）**：同一セクションの複数リテイクを検出し、最後の成功テイクのみを残します。
-3. **音響オンセット・スナッピング (`tighten_clip_to_speech`)**：声帯振動の 80 ms 前にカット点を配置し、語頭の音素を欠損させずに無音を除去します。
-4. **15 ms 等パワー音声マイクロクロスフェード**：すべてのカット境界に 15 ms のマイクロフェード（`afade=t=in:d=0.015:curve=iqsin` / `afade=t=out:d=0.015:curve=oqsin`）を適用し、ポップノイズを防止します。
-5. **マルチ NLE タイムライン出力**：**FCP7 XML**（Premiere Pro / DaVinci Resolve）、**FCPXML**（Final Cut Pro）、**CMX 3600 EDL**、および **CSV** を出力します。
+1. **レイヤー 1：純音響・句読点ベースの節分割 (`transcribe.py`)**：
+   - 息継ぎ休止（`gap >= 0.20s`）、言い淀みによる長音化（`word_dur >= 1.20s`）、句読点閉鎖、および話者交替の物理境界のみで `Sentence ID` を分割し、微細休止（`gap < 0.25s`）を跨ぐ接続詞結合（`CONJUNCTIONS`）を保持します。Python 側の文字列類似度によるリテイク推測は一切行いません。
+2. **レイヤー 2：デュアルモード LLM テイク選定 (`gemini-3.8-flash`)**：
+   - **Mode A：スクリプトアンカー単調アライメント（`--script` 指定時）**：台本を `[Script Block 01] .. [Script Block NN]` に分割し、単調順序で各ブロック最大 1 つの最終成功テイクのみを採用します。
+   - **Mode B：台本なしインテントウィンドウ調停（`--script` 省略時）**：途中放棄された断片（Abandoned Fragment）を除去しつつ、意図的な反復強調表現（3 回繰り返す強調など）を保護します。
+3. **レイヤー 3：サブユニット展開と単語境界トリミング (`resolve_clip_sub_units`)**：
+   - 複数文の範囲を個別の `Sentence ID` に展開し、`transcript` に合わせて語頭・語尾の Whisper 単語境界（`_trim_matched_words_by_transcript`）を精密に整列させます。
+4. **レイヤー 4：グローバル・クリップ間結合 (`coalesce_adjacent_sub_units`)**：
+   - 隣接クリップが連続する `Sentence ID` であり、単語間ギャップが `< 0.40s` の場合、単一の連続クリップに自動統合し、文中の不自然なジャンプカットを排除します。
+5. **音響オンセット・スナッピング＆ 15 ms 等パワー音声マイクロクロスフェード**：
+   - 声帯振動の 80 ms 前にカット点を配置し、すべてのカット境界に 15 ms のマイクロフェード（`afade=t=in:d=0.015:curve=iqsin` / `afade=t=out:d=0.015:curve=oqsin`）を適用します。
+6. **Agent Plugins 1.0 準拠構造とマルチ NLE タイムライン出力**：
+   - コアスクリプトとプロンプトは `skills/video-trimmer/scripts/` および `skills/video-trimmer/prompts/`（SSOT）に配置され、ルート POSIX シンボリックリンクと 2 層 `AGENTS.md` / `rules/AGENTS.md` を備えています。**FCP7 XML**、**FCPXML**、**CMX 3600 EDL**、**CSV** を出力します。
 
 ---
 
@@ -45,17 +53,17 @@ chmod +x setup.sh
 ## コマンドライン使用法 (CLI Usage)
 
 ```bash
-# 標準ラフカット実行（Agentic 動画理解モード有効）
-python3 video_trimmer.py -i "raw_footage.mp4" --agentic
+# Mode B：台本なし自動ラフカット（デフォルトは高速な Static Multimodal モード）
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
-# 台本（スクリプト）を用いたアライメント
-python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
+# Mode A：台本（スクリプト）を用いた単調アンカーアライメント
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
 
-# 静的マルチモーダルモード（static モード使用時のみ --agentic を省略）
-python3 video_trimmer.py -i "raw_footage.mp4"
+# Agentic 動画理解モードを明示的に有効化
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
 # Google Drive 共有リンクからの直接ラフカット
-python3 video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" --agentic -o output/
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" -o output/
 ```
 
 ---

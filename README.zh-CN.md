@@ -11,18 +11,25 @@
 
 ## 项目概览 (Overview)
 
-**Video Trimmer** 是面向口播视频、教程与演讲录像的 AI 自动粗剪引擎。系统结合 **Google Vertex AI Gemini 3.8 Flash** 多模态视频推理、**Whisper 逐字声学时间戳**（`mlx-whisper`）与 **声学起音锁定（Acoustic Onset Snapping）**。每次运行会自动剔除 NG 重录、口误与静音停顿，并导出专业 NLE 时间线（`.xml`, `.fcpxml`, `.edl`, `.csv`）及渲染完成的 MP4 视频。
+**Video Trimmer** 是面向口播视频、教程与演讲录像的 AI 自动粗剪引擎。系统结合 **Google Vertex AI Gemini 3.8 Flash** 多模态视频推理、**Whisper 逐字声学时间戳**（`mlx-whisper`）、**四层统一剪辑架构（4-Layer Unified Architecture）** 与 **声学起音锁定（Acoustic Onset Snapping）**。每次运行会自动剔除 NG 重录、口误与静音停顿，同时保护连贯长句不被切碎，并导出专业 NLE 时间线（`.xml`, `.fcpxml`, `.edl`, `.csv`）及渲染完成的 MP4 视频。
 
 ---
 
-## 核心技术能力
+## 四层统一剪辑架构与核心技术能力
 
-1. **多模态原生视频推理 (`gemini-3.8-flash`)**：同步评估讲者眼神、面部表情、卡顿与重录段落。
-2. **Last-Take-Wins（保留最后成功重录）**：自动识别同一段落的多次尝试，仅保留最后一次完整成功的镜头。
-3. **多模态主讲人分离**：结合画面口型与麦克风距离，区分出镜主讲人与场外导演口令。
-4. **声学起音锁定 (`tighten_clip_to_speech`)**：将剪辑入点锁定在声带振动前 80 ms，消除冗长前导空白且不截断字首音素。
-5. **15 ms 等功率音频微交叉淡化**：在每个剪辑边界注入 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 与 `afade=t=out:d=0.015:curve=oqsin`），消除音频跳接爆音。
-6. **多平台 NLE 时间线互通**：导出 **FCP7 XML**（Premiere Pro / DaVinci Resolve）、**FCPXML**（Final Cut Pro）、**CMX 3600 EDL** 与 **CSV**。
+1. **第一层：纯声学与标点子句切分 (`transcribe.py`)**：
+   - 仅依据物理边界切分 `Sentence ID`：换气停顿（`gap >= 0.20s`）、吃螺丝拉长音起音（`word_dur >= 1.20s`）、句尾标点与说话人轮替，同时保留微停顿（`gap < 0.25s`）下的连词黏合（`CONJUNCTIONS`）。绝不在 Python 中使用字符串相似度猜测 NG 重录。
+2. **第二层：双模式 LLM 语义择优 (`gemini-3.8-flash`)**：
+   - **Mode A：有讲稿单调锚定模式（传入 `--script`）**：将讲稿格式化为 `[Script Block 01] .. [Script Block NN]`，严格依序单调对齐，每个讲稿段落最多保留最后一次完整成功的 Take。
+   - **Mode B：无讲稿意图视窗仲裁模式（未传 `--script`）**：剔除未完成残句重录（Abandoned Fragment），同时保护刻意修辞排比强调（如三遍重复强调）。
+3. **第三层：子句展开与逐字稿边界精修 (`resolve_clip_sub_units`)**：
+   - 将多句跨度展开为独立的 `Sentence ID` 子单元，并依据 `transcript` 自动精修首尾词边界（`_trim_matched_words_by_transcript`）。
+4. **第四层：跨片段连贯小句无缝合一 (`coalesce_adjacent_sub_units`)**：
+   - 当相邻片段为连续 `Sentence ID` 且物理字间距 `< 0.40s` 时，自动合并为单一连续片段，消除长句内部的跳接（Jump-Cut）。
+5. **声学起音锁定与 15 ms 等功率微交叉淡化 (`acoustic.py` / `render.py`)**：
+   - 将剪辑入点锁定在声带振动前 80 ms，并在每个剪辑边界注入 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 与 `afade=t=out:d=0.015:curve=oqsin`）。
+6. **Agent Plugins 1.0 标准架构与多平台 NLE 时间线导出**：
+   - 核心代码与提示词位于 `skills/video-trimmer/scripts/` 与 `skills/video-trimmer/prompts/`（SSOT），根目录提供 POSIX symlinks 与双层 `AGENTS.md` / `rules/AGENTS.md` 规范；支持导出 **FCP7 XML**、**FCPXML**、**CMX 3600 EDL** 与 **CSV**。
 
 ---
 
@@ -46,17 +53,17 @@ chmod +x setup.sh
 ## 命令行使用说明 (CLI Usage)
 
 ```bash
-# 标准视频粗剪（默认启用 Agentic 视频理解模式）
-python3 video_trimmer.py -i "raw_footage.mp4" --agentic
+# Mode B：无讲稿自动粗剪（默认采用 Static Multimodal 快速模式）
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
-# 配合拍摄脚本对齐
-python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
+# Mode A：配合拍摄脚本单调锚定对齐
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
 
-# 静态抽帧模式（仅在需要 Static Multimodal 时省略 --agentic）
-python3 video_trimmer.py -i "raw_footage.mp4"
+# 明确启用 Agentic 视频理解模式
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
 # 直接从 Google Drive 分享链接进行粗剪
-python3 video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" --agentic -o output/
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" -o output/
 ```
 
 ---

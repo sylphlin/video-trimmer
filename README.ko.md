@@ -11,17 +11,25 @@
 
 ## 개요 (Overview)
 
-**Video Trimmer**는 토킹헤드 비디오, 튜토리얼 및 발표 녹화물을 위한 AI 자동 러프컷 및 트리밍 엔진입니다. **Google Vertex AI Gemini 3.8 Flash** 멀티모달 비디오 추론, **Whisper 단어 단위 음향 타임스탬프**(`mlx-whisper`) 및 **음향 온셋 스내핑(Acoustic Onset Snapping)**을 결합하여 NG 테이크, 말더듬, 무음 구간을 제거하고 NLE 타임라인(`.xml`, `.fcpxml`, `.edl`, `.csv`)과 렌더링된 MP4 비디오를 생성합니다.
+**Video Trimmer**는 토킹헤드 비디오, 튜토리얼 및 발표 녹화물을 위한 AI 자동 러프컷 및 트리밍 엔진입니다. **Google Vertex AI Gemini 3.8 Flash** 멀티모달 비디오 추론, **Whisper 단어 단위 음향 타임스탬프**(`mlx-whisper`), **4계층 통합 아키텍처(4-Layer Unified Architecture)** 및 **음향 온셋 스내핑(Acoustic Onset Snapping)**을 결합하여 NG 테이크, 말더듬, 무음 구간을 제거하면서 연속적인 문장 흐름을 유지하고 NLE 타임라인(`.xml`, `.fcpxml`, `.edl`, `.csv`)과 렌더링된 MP4 비디오를 생성합니다.
 
 ---
 
-## 핵심 기능
+## 4계층 통합 아키텍처 및 핵심 기능
 
-1. **멀티모달 비디오 추론 (`gemini-3.8-flash`)**: 발표자의 시선, 표정, 말실수 및 재촬영 구간을 동시에 평가합니다.
-2. **Last-Take-Wins (최종 성공 테이크 선택)**: 동일 대사의 반복 촬영을 감지하여 마지막 성공 테이크만 유지합니다.
-3. **음향 온셋 스내핑 (`tighten_clip_to_speech`)**: 성대 진동 80 ms 전에 컷 포인트를 배치하여 첫 음소를 자르지 않고 무음을 제거합니다.
-4. **15 ms 등전력 오디오 마이크로 크로스페이드**: 모든 편집 경계에 15 ms 마이크로 페이드(`afade=t=in:d=0.015:curve=iqsin` 및 `afade=t=out:d=0.015:curve=oqsin`)를 적용하여 팝 노이즈를 방지합니다.
-5. **멀티 NLE 타임라인 지원**: **FCP7 XML**(Premiere Pro / DaVinci Resolve), **FCPXML**(Final Cut Pro), **CMX 3600 EDL** 및 **CSV**를 내보냅니다.
+1. **계층 1: 순수 음향 및 구두점 기반 절 분할 (`transcribe.py`)**:
+   - 호흡 휴지(`gap >= 0.20s`), 발화 지연 장음(`word_dur >= 1.20s`), 문장 부호 종결, 화자 교체의 물리적 경계만으로 `Sentence ID`를 분할하며, 미세 휴지(`gap < 0.25s`) 구간의 접속사 결합(`CONJUNCTIONS`)을 보존합니다. Python 문자열 유사도를 통한 의미 추측을 완전히 배제합니다.
+2. **계층 2: 듀얼 모드 LLM 테이크 중재 (`gemini-3.8-flash`)**:
+   - **Mode A: 대본 기반 단조 정렬 (`--script` 지정 시)**: 대본을 `[Script Block 01] .. [Script Block NN]`으로 구성하고 단조 순서로 각 블록당 최대 1개의 최종 성공 테이크만 선택합니다.
+   - **Mode B: 무대본 의도 윈도우 중재 (`--script` 생략 시)**: 중단된 미완성 조각(Abandoned Fragment)은 제거하고 의도적인 수사적 반복 강조(3회 반복 강조 등)는 보존합니다.
+3. **계층 3: 서브 유닛 확장 및 단어 경계 트리밍 (`resolve_clip_sub_units`)**:
+   - 다중 문장 범위를 개별 `Sentence ID`로 확장하고 `transcript`에 맞춰 시작/끝 Whisper 단어 경계(`_trim_matched_words_by_transcript`)를 정밀하게 정렬합니다.
+4. **계층 4: 글로벌 클립 간 무결성 병합 (`coalesce_adjacent_sub_units`)**:
+   - 인접한 클립이 연속된 `Sentence ID`이고 물리적 단어 간격이 `< 0.40s`인 경우 단일 연속 클립으로 병합하여 문장 내부의 불필요한 점프컷을 제거합니다.
+5. **음향 온셋 스내핑 및 15 ms 등전력 마이크로 크로스페이드**:
+   - 성대 진동 80 ms 전에 컷 포인트를 배치하고 모든 편집 경계에 15 ms 마이크로 페이드(`afade=t=in:d=0.015:curve=iqsin` 및 `afade=t=out:d=0.015:curve=oqsin`)를 적용하여 팝 노이즈를 방지합니다.
+6. **Agent Plugins 1.0 표준 아키텍처 및 멀티 NLE 타임라인 지원**:
+   - 핵심 스크립트와 프롬프트는 `skills/video-trimmer/scripts/` 및 `skills/video-trimmer/prompts/`(SSOT)에 위치하며 루트 POSIX 심볼릭 링크와 2계층 `AGENTS.md` / `rules/AGENTS.md`를 제공합니다. **FCP7 XML**, **FCPXML**, **CMX 3600 EDL** 및 **CSV**를 내보냅니다.
 
 ---
 
@@ -45,17 +53,17 @@ chmod +x setup.sh
 ## 명령줄 사용법 (CLI Usage)
 
 ```bash
-# 표준 러프컷 실행 (Agentic 비디오 이해 모드 기본 사용)
-python3 video_trimmer.py -i "raw_footage.mp4" --agentic
+# Mode B: 무대본 자동 러프컷 (기본값은 빠른 Static Multimodal 모드)
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
-# 촬영 대본 정렬
-python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
+# Mode A: 촬영 대본 기반 단조 정렬
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
 
-# 정적 멀티모달 모드 (static 모드 사용 시에만 --agentic 생략)
-python3 video_trimmer.py -i "raw_footage.mp4"
+# Agentic 비디오 이해 모드 명시적 활성화
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
 # Google Drive 공유 링크에서 직접 러프컷 실행
-python3 video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" --agentic -o output/
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" -o output/
 ```
 
 ---

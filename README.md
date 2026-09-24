@@ -11,63 +11,68 @@
 
 ## Overview
 
-**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 3.8 Flash** multimodal video reasoning with **Whisper Word-Level Acoustic Ground Truth** (`mlx-whisper`) and **Acoustic Onset Snapping**. Each run removes bad takes, stutters, and dead air, then exports NLE project timelines (`.xml`, `.fcpxml`, `.edl`, `.csv`) and a rendered MP4 video.
+**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 3.8 Flash** multimodal video reasoning with **Whisper Word-Level Acoustic Ground Truth** (`mlx-whisper`), a **4-Layer Unified Architecture**, and **Acoustic Onset Snapping**. Each run removes bad takes, stutters, and dead air without truncating continuous speech, then exports NLE project timelines (`.xml`, `.fcpxml`, `.edl`, `.csv`) and a rendered MP4 video.
 
 ---
 
-## Core Capabilities
+## 4-Layer Unified Architecture & Core Capabilities
 
-1. **Multimodal Video Reasoning (`gemini-3.8-flash`)**:
-   - Analyzes video and audio directly on Vertex AI via Cloud Storage (`gs://${BUCKET}/raw/`).
-   - Evaluates presenter eye contact, facial expressions, stuttering, and retakes simultaneously.
-2. **Last-Take-Wins Selection**:
-   - Detects repeated attempts at the same script line and keeps only the final complete take.
-3. **Multimodal Active Speaker Separation**:
-   - Distinguishes the on-camera presenter from off-camera crew cues (`Action`, `Cut`) using visual mouth movement and microphone proximity.
-4. **Acoustic Onset Snapping (`tighten_clip_to_speech`)**:
-   - Scans the local audio waveform to place cut points 80 ms before vocal cord vibration, removing pre-speech silence without clipping initial phonemes.
-5. **Adaptive Noise-Floor & Tail Preservation**:
-   - Measures local room noise to preserve soft trailing syllables and natural breathing pauses based on presenter Characters Per Second (CPS).
-6. **15 ms Audio Equal-Power Micro-Crossfade**:
-   - Applies 15 ms equal-power micro-fades (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=oqsin`) at every cut boundary to prevent acoustic pops.
-7. **Shooting Script Alignment (`--script`)**:
-   - Accepts an optional markdown or text shooting script (`shooting_script.md`) to match takes against intended sections.
-8. **Multi-NLE Timeline Interoperability**:
+1. **Layer 1 — Pure Acoustic & Punctuation Clause Segmentation (`transcribe.py`)**:
+   - Extracts phoneme-aligned word timestamps via Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA).
+   - Splits `Sentence ID` units purely on physical boundaries: breath pauses (`gap >= 0.20 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), punctuation closure, and speaker turns, while preserving conjunction attachment (`CONJUNCTIONS`) across micro-pauses (`gap < 0.25 s`).
+   - Enforces a strict **Zero Python String-Similarity Rule**: Python never guesses semantic retakes via character overlap; semantic arbitration belongs exclusively to the LLM.
+2. **Layer 2 — Dual-Mode LLM Take Arbitration (`gemini-3.8-flash`)**:
+   - **Mode A: Monotonic Script-Anchored Alignment (`--script`)**: Formats the reference script into `[Script Block 01] .. [Script Block NN]` and selects at most one final complete take per script block in strict monotonic order.
+   - **Mode B: Unscripted Intent-Window Arbitration (No `--script`)**: Groups consecutive clauses into semantic intent windows, prunes abandoned fragments and false starts, and preserves intentional rhetorical repetition (e.g., three-part emphasis).
+   - **Tail-to-Head Overlap Check**: Prevents duplicate opening clauses across adjacent output clips.
+3. **Layer 3 — Sub-Unit Expansion & Transcript Word-Boundary Trimming (`resolve_clip_sub_units`)**:
+   - Expands multi-sentence spans into individual `Sentence ID` sub-units so dropped NG sentences inside a time window are excluded.
+   - Aligns `t_first` and `t_last` to the exact Whisper word boundaries of `clip_data["transcript"]` (`_trim_matched_words_by_transcript`) when the LLM trims a boundary stumble.
+4. **Layer 4 — Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`)**:
+   - Merges consecutive `Sentence ID`s across adjacent EDL clips when the physical inter-word gap is `< 0.40 s` and no `Sentence ID` was skipped, eliminating artificial internal jump-cuts and redundant micro-fades inside continuous sentences.
+5. **Acoustic Onset Snapping & Plosive Tail Defense (`acoustic.py`)**:
+   - Places cut-in points 80 ms before vocal cord vibration and dynamically calculates lead-in/lead-out margins from presenter Characters Per Second (CPS) while enforcing `true_speech_end >= t_last`.
+6. **15 ms Audio Equal-Power Micro-Crossfade (`render.py`)**:
+   - Applies 15 ms equal-power micro-fades (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=oqsin`) at every cut boundary to eliminate audio pop artifacts.
+7. **Multi-NLE Timeline Interoperability (`exporters.py`)**:
    - Exports frame-accurate **Final Cut Pro 7 XML** (`.xml` for Adobe Premiere Pro and DaVinci Resolve), **Apple Final Cut Pro FCPXML** (`.fcpxml`), **CMX 3600 EDL** (`.edl`), and **CSV** cut lists across standard frame rates (`23.976` to `60` fps).
 
 ---
 
-## Project Structure
+## Project Structure (Agent Plugins 1.0 Specification)
 
 ```text
 video-trimmer/
-├── plugin.json                 # Agent Plugins 1.0 manifest
+├── plugin.json                              # Agent Plugins 1.0 manifest
 ├── rules/
-│   └── AGENTS.md               # Read-only and fail-fast operational invariants for AI clients
+│   └── AGENTS.md                            # Packaged client execution invariants (read-only & fail-fast)
 ├── skills/
-│   └── video-trimmer/
-│       └── SKILL.md            # Agent Skill specification and operational manual
-├── AGENTS.md                   # Permanent project invariants and developer rules (ASD-STE100)
-├── README.md                   # English documentation
-├── LICENSE                     # MIT License
-├── .env.example                # Environment variables template for Vertex AI and GCS
-├── setup.sh                    # Native gcloud provisioning script (Zero Terraform)
-├── pyproject.toml              # PEP 621 Python package configuration
-├── requirements.txt            # Python dependencies
-├── video_trimmer.py            # Primary CLI entrypoint forwarder
-├── scripts/                    # Core engine modules
-│   ├── video_trimmer.py        # CLI parser and pipeline orchestrator
-│   ├── constants.py            # Named constants
-│   ├── exceptions.py           # Exception hierarchy
-│   ├── acoustic.py             # CPS calculation, onset snapping, and tail margins
-│   ├── transcribe.py           # Whisper word-level transcription and sentence alignment
-│   ├── gemini_client.py        # Vertex AI (ADC) client and multimodal inference
-│   ├── gcs_utils.py            # Cloud Storage staging, Google Drive cache, and CJK filename recovery
-│   ├── exporters.py            # FCP7 XML, FCPXML, EDL, and CSV timeline exporters
-│   └── render.py               # ffprobe inspection and FFmpeg micro-crossfade rendering
-├── prompts/
-│   └── video_cut_prompt.md     # Multimodal rough-cut prompt specification
-└── tests/                      # Offline unit tests
+│   └── video-trimmer/                       # Canonical Skill Bundle (Single Source of Truth)
+│       ├── SKILL.md                         # Agent Skill specification and operational manual
+│       ├── scripts/                         # Canonical core engine modules (SSOT)
+│       │   ├── __init__.py
+│       │   ├── video_trimmer.py             # CLI parser and 4-layer pipeline orchestrator
+│       │   ├── constants.py                 # Named constants
+│       │   ├── exceptions.py                # Exception hierarchy
+│       │   ├── acoustic.py                  # CPS calculation, onset snapping, and tail margins
+│       │   ├── transcribe.py                # Acoustic clause segmentation, word trimming, and coalescing
+│       │   ├── gemini_client.py             # Vertex AI (ADC) client and dual-mode prompt builder
+│       │   ├── gcs_utils.py                 # Cloud Storage staging, Google Drive cache, and CJK recovery
+│       │   ├── exporters.py                 # FCP7 XML, FCPXML, EDL, and CSV timeline exporters
+│       │   └── render.py                    # ffprobe inspection and FFmpeg micro-crossfade rendering
+│       └── prompts/                         # Canonical prompt specifications (SSOT)
+│           └── video_cut_prompt.md          # Dual-mode take arbitration & 5-rule subtraction prompt
+├── scripts -> skills/video-trimmer/scripts  # Root POSIX symlink for CLI & test compatibility
+├── prompts -> skills/video-trimmer/prompts  # Root POSIX symlink for prompt resolution
+├── AGENTS.md                                # Workspace & engineering development rules (Part I & Part II)
+├── README.md                                # English documentation
+├── LICENSE                                  # MIT License
+├── .env.example                             # Environment variables template for Vertex AI and GCS
+├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
+├── pyproject.toml                           # PEP 621 Python package configuration
+├── requirements.txt                         # Python dependencies
+├── video_trimmer.py                         # Primary CLI entrypoint forwarder
+└── tests/                                   # Offline unit test suite (81 tests)
 ```
 
 ---
@@ -124,20 +129,20 @@ chmod +x setup.sh
 ## Command-Line Usage
 
 ```bash
-# Standard rough-cut execution (with Agentic Video Understanding)
-python3 video_trimmer.py -i "raw_footage.mp4" --agentic
+# Mode B: Unscripted rough-cut (Static Multimodal by default, fast & timeout-free)
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
-# Align takes against a shooting script
-python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
+# Mode A: Script-Anchored rough-cut (Monotonic [Script Block NN] alignment)
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
 
 # Apply compact pacing for fast-paced tutorials
-python3 video_trimmer.py -i "sample_take.mp4" --pacing compact --suffix "fast" --agentic
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "sample_take.mp4" --pacing compact --suffix "fast"
 
-# Run in Static Multimodal mode (omit --agentic only when static sampling is desired)
-python3 video_trimmer.py -i "raw_footage.mp4"
+# Enable Agentic Video Understanding mode when explicitly requested
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
 # Re-render locally from a cached EDL JSON without re-running Gemini inference
-python3 video_trimmer.py -i "raw_footage.mp4" --cached-json "raw_footage_agentic_edl.json"
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cached-json "raw_footage_static_edl.json"
 ```
 
 ---
@@ -153,8 +158,8 @@ python3 video_trimmer.py -i "raw_footage.mp4" --cached-json "raw_footage_agentic
 | `--region` | | `global` | Vertex AI location (`GOOGLE_CLOUD_LOCATION`) |
 | `--bucket` | | `None` | GCS staging bucket (`VIDEO_TRIMMER_BUCKET`) |
 | `--keep-gcs-upload` | | `False` | Retain staged video in `gs://<bucket>/raw/` after inference |
-| `--script` | `-s` | `None` | Shooting script file path (`shooting_script.md` or `.txt`) |
-| `--agentic` | | `False` | Enable Agentic Video Understanding mode |
+| `--script` | `-s` | `None` | Shooting script file path (`shooting_script.md` or `.txt`) to enable Mode A |
+| `--agentic` | | `False` | Enable Agentic Video Understanding mode (default is Static Multimodal) |
 | `--pacing` | `-p` | `auto` | Pacing mode: `auto` (adaptive CPS), `compact`, or `breathing` |
 | `--cached-json` | | `None` | Existing EDL JSON path to skip cloud inference |
 | `--suffix` | | `None` | Custom filename suffix tag |
@@ -177,20 +182,6 @@ For an input video `raw_footage.mp4`, the tool generates:
 
 ---
 
-## Import Timelines into NLE Software
-
-- **DaVinci Resolve**:
-  1. Open the Media Pool and select **File -> Import -> Timeline...** (`Cmd + Shift + I` or `Ctrl + Shift + I`).
-  2. Select `raw_footage_<tag>_edl.xml`.
-- **Adobe Premiere Pro**:
-  1. Select **File -> Import...** (`Cmd + I` or `Ctrl + I`).
-  2. Select `raw_footage_<tag>_edl.xml` and open the imported sequence.
-- **Final Cut Pro**:
-  1. Select **File -> Import -> XML...**.
-  2. Select `raw_footage_<tag>_edl.fcpxml`.
-
----
-
 ## Google Drive Direct Links & Two-Tier GCS Lifecycle Policy
 
 ### 1. Supported Google Drive Scenarios (`drive.readonly` ADC)
@@ -198,7 +189,7 @@ For an input video `raw_footage.mp4`, the tool generates:
 | Scenario | Input Flag Syntax | Automated Behavior |
 | :--- | :--- | :--- |
 | **Scenario A: Google Drive Video Rough-Cut** | `-i "https://drive.google.com/file/d/FILE_ID/view"` | Verifies remote `md5Checksum`, recovers UTF-8 CJK filenames, caches in `gdrive_inputs/`, runs local Whisper word-level timing, and stages to GCS `raw/`. |
-| **Scenario B: Script-Guided Cloud Rough-Cut** | `-i "https://drive.google.com/file/d/FILE_ID/view" -s shooting_script.md --agentic` | Matches retakes against `shooting_script.md`, keeps the final valid take, tightens speech boundaries, and exports `.mp4`, `.xml`, and `.fcpxml`. |
+| **Scenario B: Script-Guided Cloud Rough-Cut** | `-i "https://drive.google.com/file/d/FILE_ID/view" -s shooting_script.md` | Aligns takes monotonically against `[Script Block NN]`, keeps the final valid take, coalesces continuous sub-units, and exports `.mp4`, `.xml`, and `.fcpxml`. |
 | **Scenario C: Direct GCS URI Input** | `-i "gs://video-preprocessing-PROJECT_ID/raw/raw_footage.mp4"` | References the existing GCS object in Vertex AI without re-uploading. |
 
 ### 2. Two-Tier GCS Bucket Lifecycle Policy (`gs://video-preprocessing-${PROJECT_ID}`)
@@ -212,7 +203,7 @@ For an input video `raw_footage.mp4`, the tool generates:
 
 ## Unit Testing
 
-Run the offline test suite before committing changes:
+Run the offline test suite (81 tests) before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v

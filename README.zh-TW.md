@@ -11,29 +11,61 @@
 
 ## 專案總覽 (Overview)
 
-**Video Trimmer** 是專為單機位口播、教學影片與演講錄影設計的 AI 自動粗剪與去蕪存菁引擎。系統結合 **Google Vertex AI Gemini 3.8 Flash** 原生多模態影片理解、**Whisper 毫秒級逐字聲學時間戳**（Apple Silicon Metal `mlx-whisper` 加速）以及 **聲學起音鎖定（Acoustic Onset Snapping）**。每次執行會自動剔除 NG 重錄、吃螺絲與無效停頓，並匯出多格式專業剪輯時間軸（`.xml`, `.fcpxml`, `.edl`, `.csv`）與完成粗剪的 MP4 影片。
+**Video Trimmer** 是專為單機位口播、教學影片與演講錄影設計的 AI 自動粗剪與去蕪存菁引擎。系統結合 **Google Vertex AI Gemini 3.8 Flash** 原生多模態影片理解、**Whisper 毫秒級逐字聲學時間戳**（Apple Silicon Metal `mlx-whisper` 加速）、**四層統一剪輯架構（4-Layer Unified Architecture）** 以及 **聲學起音鎖定（Acoustic Onset Snapping）**。每次執行會自動剔除 NG 重錄、吃螺絲與無效停頓，同時保護連貫長句不被切碎，並匯出多格式專業剪輯時間軸（`.xml`, `.fcpxml`, `.edl`, `.csv`）與完成粗剪的 MP4 影片。
 
 ---
 
-## 核心技術特點
+## 四層統一剪輯架構與核心技術特點
 
-1. **多模態原生影片理解 (`gemini-3.8-flash`)**：
-   - 透過 Cloud Storage（`gs://${BUCKET}/raw/`）將原始影片送入 Vertex AI 分析。
-   - 同步評估講者眼神、表情、口誤與重錄段落。
-2. **Last-Take-Wins（保留最後成功重錄）**：
-   - 自動識別同一段台詞的多次試講或重錄，精準保留最後一次完整成功的版本。
-3. **多模態主講者分離**：
-   - 結合畫面嘴型同步與麥克風收音距離，區分鏡頭前主講者與場外工作人員口令（如 `Action`、`Cut`）。
-4. **聲學起音鎖定 (`tighten_clip_to_speech`)**：
-   - 掃描本地音訊波形，將剪輯入點鎖定於聲帶發聲前 80 ms，消除開口前的冗長空白且不截斷字首音節。
-5. **自適應底噪與字尾保留**：
-   - 依據講者語速（CPS）與環境底噪動態計算緩衝邊界，完整保留鼻音結尾與自然思考停頓。
-6. **15 ms 等功率音訊微淡入淡出**：
+1. **第一層：純聲學與標點子句切分 (`transcribe.py`)**：
+   - 透過 Whisper 提取逐字時間戳，僅依據物理邊界切分 `Sentence ID`：換氣停頓（`gap >= 0.20s`）、吃螺絲拉長音起音（`word_dur >= 1.20s` 且單字元 `>= 0.45s`）、句尾標點與說話者輪替，同時保留微停頓（`gap < 0.25s`）下的連詞黏合（`CONJUNCTIONS`）。
+   - **零 Python 語意猜測原則**：絕不在 Python 端使用字串相似度猜測 NG 重講，語意判斷 100% 交由 LLM 處理。
+2. **第二層：雙模式 LLM 語意擇優 (`gemini-3.8-flash`)**：
+   - **Mode A：有講稿單調錨定模式（傳入 `--script`）**：自動將講稿切分為 `[Script Block 01] .. [Script Block NN]`，嚴格依序單調對齊，每個講稿段落最多僅保留最後一次完整成功的 Take，徹底杜絕講稿句子重複出現。
+   - **Mode B：無講稿意圖視窗仲裁模式（未傳 `--script`）**：以局部語意視窗識別「未完成殘句重講（Abandoned Fragment）」並予以剔除，同時保護「刻意修辭排比強調（如：請訂閱、請訂閱、請訂閱）」不被誤刪。
+   - **跨片段首尾防重疊檢查（Tail-to-Head Overlap Check）**：防止相鄰輸出片段出現首尾重複子句。
+3. **第三層：子句展開與逐字稿邊界精修 (`resolve_clip_sub_units`)**：
+   - 將多句跨度自動展開為獨立的 `Sentence ID` 子單元，自動略過時間區間內未被選中的 NG 句。
+   - 當 LLM 在 `transcript` 欄位修剪了句首或句尾贅字時，透過 `_trim_matched_words_by_transcript` 自動將 `t_first` 與 `t_last` 對齊至實際保留字詞的 Whisper 邊界。
+4. **第四層：跨片段連貫小句無縫合一 (`coalesce_adjacent_sub_units`)**：
+   - 當相鄰片段為連續 `Sentence ID`（中間未跳過任何 NG 句）且物理字間距 `< 0.40s` 時，自動合併為單一連續片段，消除長句內部的無謂跳接（Jump-Cut）與多餘微淡化。
+5. **聲學起音鎖定與字尾塞音保護 (`acoustic.py`)**：
+   - 將剪輯入點鎖定於聲帶發聲前 80 ms，並依據講者語速（CPS）動態計算緩衝邊界，強制 `true_speech_end >= t_last` 以保護字尾無聲除阻音與鼻音。
+6. **15 ms 等功率音訊微淡入淡出 (`render.py`)**：
    - 於每個剪輯切點自動注入 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 與 `afade=t=out:d=0.015:curve=oqsin`），消除跳接爆音（Audio Pop）。
-7. **拍攝腳本對齊 (`--script`)**：
-   - 支援傳入拍攝腳本（`shooting_script.md`），引導模型逐段比對台詞完整性。
-8. **多平台 NLE 時間軸匯出**：
+7. **多平台 NLE 時間軸匯出 (`exporters.py`)**：
    - 支援匯出 **Final Cut Pro 7 XML**（`.xml`，適用於 Adobe Premiere Pro 與 DaVinci Resolve）、**Apple Final Cut Pro FCPXML**（`.fcpxml`）、**CMX 3600 EDL**（`.edl`）與 **CSV** 剪輯表。
+
+---
+
+## 專案目錄結構（Agent Plugins 1.0 標準規範）
+
+```text
+video-trimmer/
+├── plugin.json                              # Agent Plugins 1.0 宣告清單
+├── rules/
+│   └── AGENTS.md                            # 打包於 Plugin 內的客戶端執行期守則（唯讀與 Fail-Fast）
+├── skills/
+│   └── video-trimmer/                       # 標準技能套件主幹（Single Source of Truth）
+│       ├── SKILL.md                         # 技能規範與自動化執行手冊
+│       ├── scripts/                         # 核心引擎模組實體目錄 (SSOT)
+│       │   ├── __init__.py
+│       │   ├── video_trimmer.py             # CLI 解析與四層管線協調器
+│       │   ├── acoustic.py                  # CPS 語速計算、聲學起音鎖定與字尾保護
+│       │   ├── transcribe.py                # 聲學切句、逐字邊界精修與跨片段無縫合一
+│       │   ├── gemini_client.py             # Vertex AI (ADC) 客戶端與雙模式提示詞建構
+│       │   ├── gcs_utils.py                 # GCS 暫存、Google Drive 快取與中文檔名修復
+│       │   ├── exporters.py                 # FCP7 XML、FCPXML、EDL 與 CSV 時間軸匯出
+│       │   └── render.py                    # ffprobe 檢測與 FFmpeg 15ms 微淡化渲染
+│       └── prompts/                         # 提示詞規範實體目錄 (SSOT)
+│           └── video_cut_prompt.md          # 雙模式語意仲裁與五律減法剪輯規範
+├── scripts -> skills/video-trimmer/scripts  # 根目錄 POSIX Symlink（供 CLI 與測試直接引用）
+├── prompts -> skills/video-trimmer/prompts  # 根目錄 POSIX Symlink
+├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
+├── video_trimmer.py                         # 根目錄 CLI 啟動入口
+├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
+└── tests/                                   # 離線單元測試套件（81 項測試）
+```
 
 ---
 
@@ -73,31 +105,21 @@ chmod +x setup.sh
 ## 命令列使用說明 (CLI Usage)
 
 ```bash
-# 標準影片粗剪（預設啟用 Agentic 動態影格探索）
-python3 video_trimmer.py -i "raw_footage.mp4" --agentic
+# Mode B：無講稿自動粗剪（預設採用 Static Multimodal 快速模式）
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
-# 搭配拍攝腳本對齊
-python3 video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
+# Mode A：搭配拍攝腳本單調錨定對齊（推薦有講稿拍攝使用）
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
 
 # 採用緊湊節奏模式（適用於快節奏教學影片）
-python3 video_trimmer.py -i "sample_take.mp4" --pacing compact --suffix "fast" --agentic
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "sample_take.mp4" --pacing compact --suffix "fast"
 
-# 傳統靜態抽幀模式（僅於需要 Static Multimodal 時省略 --agentic）
-python3 video_trimmer.py -i "raw_footage.mp4"
+# 明確啟用 Agentic 動態影格探索模式
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
-# 直接讀取 Google Drive 分享連結進行粗剪
-python3 video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" --agentic -o output/
+# 使用已快取的 EDL JSON 本地快速重算與渲染
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cached-json "raw_footage_static_edl.json"
 ```
-
----
-
-## 匯出檔案與 NLE 匯入步驟
-
-針對輸入檔案 `raw_footage.mp4`，系統會產出：
-1. **`raw_footage_<tag>_trimmed.mp4`**：含 15 ms 音訊微淡入淡出的粗剪影片。
-2. **`raw_footage_<tag>_edl.xml`**：供 **DaVinci Resolve** 與 **Adobe Premiere Pro** 匯入的 FCP7 XML 時間軸。
-3. **`raw_footage_<tag>_edl.fcpxml`**：供 **Final Cut Pro** 匯入的 FCPXML 時間軸。
-4. **`raw_footage_<tag>_edl.json` / `.csv`**：結構化剪輯決策紀錄與表格。
 
 ---
 
