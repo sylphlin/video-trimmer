@@ -6,9 +6,12 @@ except ImportError:
     import tests
     import pytest
 
+from pathlib import Path
+import tempfile
+from scripts.gemini_client import build_prompt, format_script_blocks_for_prompt
 from scripts.transcribe import (
     align_clip_with_whisper,
-    is_earlier_sentence_ng_retake,
+    coalesce_adjacent_sub_units,
     resolve_clip_sub_units,
 )
 
@@ -116,5 +119,94 @@ class TestAlignClipWithWhisper(unittest.TestCase):
         assert sub_units[0]["t_last"] == pytest.approx(12.0, abs=0.05)
         assert sub_units[1]["t_first"] == pytest.approx(16.0, abs=0.05)
         assert sub_units[1]["t_last"] == pytest.approx(19.0, abs=0.05)
+
+    def test_resolve_clip_sub_units_trims_trailing_stumble_via_llm_transcript(self):
+        """Verify that when LLM selects Sentence 6 but omits a trailing false start in transcript, t_last snaps to the clean word boundary."""
+        words = [
+            {"word": "完美的監控工具", "start": 39.16, "end": 42.50},
+            {"word": "其實已經在你家裡了", "start": 42.50, "end": 45.20},
+            {"word": "那就是WiFi", "start": 45.20, "end": 47.10},
+            {"word": "你大概也聽過細微摔", "start": 47.30, "end": 51.60},
+        ]
+        s6 = _sentence(
+            6,
+            39.16,
+            51.60,
+            "完美的監控工具其實已經在你家裡了那就是WiFi你大概也聽過細微摔",
+            words,
+        )
+        clip = {
+            "sentence_ids": [6],
+            "start_sentence_id": 6,
+            "end_sentence_id": 6,
+            "transcript": "完美的監控工具其實已經在你家裡了，那就是WiFi。",
+            "topic": "Opening",
+        }
+        sub_units = resolve_clip_sub_units([s6], clip, total_dur=60.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_first"] == pytest.approx(39.16, abs=0.02)
+        assert sub_units[0]["t_last"] == pytest.approx(47.10, abs=0.02)
+
+    def test_coalesce_adjacent_sub_units_merges_contiguous_clips_and_preserves_skipped_id_cuts(self):
+        """Verify global cross-clip coalescing merges contiguous Sentence IDs (<0.40s) across clips without merging across skipped NG IDs."""
+        expanded = [
+            {
+                "topic": "Part A",
+                "sentence_ids": [6],
+                "t_first": 39.16,
+                "t_last": 43.20,
+                "prev_sentence_end": 34.0,
+                "next_sentence_start": 43.35,
+                "transcript": "完美的監控工具其實已經在你家裡了",
+            },
+            {
+                "topic": "Part B",
+                "sentence_ids": [7],
+                "t_first": 43.35,
+                "t_last": 47.10,
+                "prev_sentence_end": 43.20,
+                "next_sentence_start": 47.30,
+                "transcript": "那就是WiFi",
+            },
+            {
+                "topic": "Part C (Skipped NG ID 8)",
+                "sentence_ids": [9],
+                "t_first": 51.60,
+                "t_last": 58.00,
+                "prev_sentence_end": 51.40,
+                "next_sentence_start": None,
+                "transcript": "你大概也聽過WiFi訊號撞到人體會出現細微衰減",
+            },
+        ]
+        coalesced = coalesce_adjacent_sub_units(expanded, max_internal_gap=0.40)
+        assert len(coalesced) == 2
+        assert coalesced[0]["sentence_ids"] == [6, 7]
+        assert coalesced[0]["t_first"] == pytest.approx(39.16)
+        assert coalesced[0]["t_last"] == pytest.approx(47.10)
+        assert coalesced[1]["sentence_ids"] == [9]
+        assert coalesced[1]["t_first"] == pytest.approx(51.60)
+
+    def test_dual_mode_prompt_formatting_mode_a_and_mode_b(self):
+        """Verify build_prompt generates Mode A numbered script blocks with script_path and Mode B without script_path."""
+        prompt_candidates = [Path(__file__).resolve().parent.parent / "prompts" / "video_cut_prompt.md"]
+        units = _build_units()
+
+        # Mode B (no script)
+        prompt_b = build_prompt(prompt_candidates, script_path=None, whisper_units=units)
+        assert "Mode B: Unscripted Intent-Window Take Arbitration (Active)" in prompt_b
+        assert "請訂閱，請訂閱，請訂閱，重要的事情要說三遍" in prompt_b
+
+        # Mode A (with script)
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as tmp:
+            tmp.write("# Section 1\n第一段講稿內容\n第二段講稿內容\n")
+            tmp_path = Path(tmp.name)
+        try:
+            prompt_a = build_prompt(prompt_candidates, script_path=tmp_path, whisper_units=units)
+            assert "Mode A: Monotonic Script-Anchored Take Arbitration (Active)" in prompt_a
+            assert "[Script Block 01] 第一段講稿內容" in prompt_a
+            assert "[Script Block 02] 第二段講稿內容" in prompt_a
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
 
 

@@ -142,10 +142,22 @@ def is_earlier_sentence_ng_retake(prev_text: str, next_text: str) -> bool:
     return False
 
 
-def _split_sentence_on_paused_restarts(sentence_data: dict, min_pause_sec: float = 0.18) -> list[dict]:
+CONJUNCTIONS = ("但是", "而且", "所以", "然而", "如果", "因為", "不過", "雖然", "或是", "或者")
+
+
+def _split_sentence_on_paused_restarts(
+    sentence_data: dict,
+    min_pause_sec: float = 0.22,
+    min_clause_chars: int = 5,
+) -> list[dict]:
     """
-    若單字與單字之間存在物理停頓 (gap >= min_pause_sec)、或 Whisper 將停頓吸收進拉長字詞 (>= 1.0s)、
-    或句中重啟了前面剛講過的子句開頭，則於該詞邊界切分為獨立 Sentence。
+    Split a merged sentence at physical intra-sentence pauses or stretched boundary words.
+
+    ASD-STE100:
+    Evaluate word-level acoustic gaps and durations without text-similarity comparisons.
+    Split when an internal pause (gap >= min_pause_sec) or a stretched word (>= 0.90s)
+    separates two complete clauses of at least min_clause_chars characters.
+    Keep conjunction prefixes attached when the gap is below 0.85s.
     """
     words = sentence_data.get("words", [])
     if len(words) < 6:
@@ -157,26 +169,26 @@ def _split_sentence_on_paused_restarts(sentence_data: dict, min_pause_sec: float
     for j in range(1, len(words)):
         gap = float(words[j].get("start", 0.0)) - float(words[j - 1].get("end", 0.0))
         word_dur = float(words[j].get("end", 0.0)) - float(words[j].get("start", 0.0))
-        prev_word_dur = float(words[j - 1].get("end", 0.0)) - float(words[j - 1].get("start", 0.0))
+        w_chars = max(1, len(normalize_text(words[j].get("word", ""))))
+        is_stretched_onset = (word_dur >= 1.20) and ((word_dur / w_chars) >= 0.45)
 
-        has_acoustic_pause = (gap >= min_pause_sec) or (word_dur >= 1.0) or (prev_word_dur >= 1.0)
+        has_physical_pause = (gap >= min_pause_sec) or is_stretched_onset
+        if not has_physical_pause:
+            continue
 
-        if has_acoustic_pause or (j >= 4):
-            prev_text = "".join(w.get("word", "") for w in words[seg_start_idx:j]).strip()
-            rem_text = "".join(w.get("word", "") for w in words[j : min(len(words), j + 18)]).strip()
-            if is_fuzzy_prefix_restart(prev_text, rem_text, similarity_threshold=0.75):
-                split_word_indices.append(j)
-                seg_start_idx = j
-                continue
+        prev_text = "".join(w.get("word", "") for w in words[seg_start_idx:j]).strip()
+        rem_text = "".join(w.get("word", "") for w in words[j:]).strip()
+        prev_norm = normalize_text(prev_text)
+        rem_norm = normalize_text(rem_text)
 
-        if gap >= min_pause_sec:
-            prev_text = "".join(w.get("word", "") for w in words[seg_start_idx:j]).strip()
-            rem_text = "".join(w.get("word", "") for w in words[j : min(len(words), j + 18)]).strip()
-            prev_norm = normalize_text(prev_text)
-            rem_norm = normalize_text(rem_text)
-            if len(prev_norm) >= 3 and len(rem_norm) >= 3 and rem_norm[:3] in prev_norm:
-                split_word_indices.append(j)
-                seg_start_idx = j
+        if len(prev_norm) < min_clause_chars or len(rem_norm) < min_clause_chars:
+            continue
+
+        if gap < 0.85 and any(rem_text.startswith(c) for c in CONJUNCTIONS):
+            continue
+
+        split_word_indices.append(j)
+        seg_start_idx = j
 
     if not split_word_indices:
         return [sentence_data]
@@ -203,95 +215,93 @@ def _split_sentence_on_paused_restarts(sentence_data: dict, min_pause_sec: float
     return sub_sentences
 
 
-def merge_whisper_segments_to_sentences(segments, max_gap=0.45, max_sentence_dur=14.0):
+def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur=8.0):
     """
-    將 Whisper 零碎的聲學 Segments 依據自然換氣停頓、聲紋主講人狀態與語法標點合併為完整語意句子。
-    若相鄰片段呈現重講/重複前綴（Last Take Wins 候選），強制不黏合以保持獨立 Sentence ID。
+    Group Whisper segments into clause-level sentences using pure acoustic pauses and punctuation.
+
+    ASD-STE100:
+    Segment speech by physical breath pauses, punctuation closure, and speaker turns.
+    Do not compare text strings to guess retakes.
+    Preserve conjunction attachment to prevent isolated transition tokens.
     """
     if not segments:
         return []
 
-    CLOSURE_PUNCT = ('。', '！', '？', '!', '?', '……', '...')
-    CONJUNCTIONS = ('但是', '而且', '所以', '然而', '如果', '因為', '不過', '雖然', '或是', '或者')
+    CLOSURE_PUNCT = ("。", "！", "？", "!", "?", "……", "...")
 
     raw_sentences = []
     curr = None
-    last_seg_text = ""
 
     for s in segments:
-        s_text = s['text'].strip()
-        s_start = s['start']
-        s_end = s['end']
-        s_words = s.get('words', [])
-        s_is_target = s.get('is_target_speaker', True)
-        s_spk = s.get('speaker_id', 'SPEAKER_00')
+        s_text = s["text"].strip()
+        s_start = s["start"]
+        s_end = s["end"]
+        s_words = s.get("words", [])
+        s_is_target = s.get("is_target_speaker", True)
+        s_spk = s.get("speaker_id", "SPEAKER_00")
 
         if curr is None:
             curr = {
-                'id': 1,
-                'start': s_start,
-                'end': s_end,
-                'text': s_text,
-                'words': list(s_words),
-                'orig_segment_ids': [s['id']],
-                'speaker_id': s_spk,
-                'is_target_speaker': s_is_target
+                "id": 1,
+                "start": s_start,
+                "end": s_end,
+                "text": s_text,
+                "words": list(s_words),
+                "orig_segment_ids": [s["id"]],
+                "speaker_id": s_spk,
+                "is_target_speaker": s_is_target,
             }
-            last_seg_text = s_text
             _compute_sentence_speaker(curr)
             continue
 
-        gap = s_start - curr['end']
-        curr_text = curr['text'].strip()
-        dur = s_end - curr['start']
+        gap = s_start - curr["end"]
+        curr_text = curr["text"].strip()
+        curr_norm_len = len(normalize_text(curr_text))
+        dur = s_end - curr["start"]
 
-        # Check if incoming segment is a retake restart of the current sentence
-        is_retake_restart = (
-            is_fuzzy_prefix_restart(curr_text, s_text)
-            or is_fuzzy_prefix_restart(last_seg_text, s_text)
-            or is_earlier_sentence_ng_retake(curr_text, s_text)
-            or is_earlier_sentence_ng_retake(last_seg_text, s_text)
-        )
+        first_w_stretched = False
+        if s_words:
+            fw = s_words[0]
+            fw_dur = float(fw.get("end", 0.0)) - float(fw.get("start", 0.0))
+            fw_chars = max(1, len(normalize_text(fw.get("word", ""))))
+            first_w_stretched = (fw_dur >= 1.20) and ((fw_dur / fw_chars) >= 0.45)
 
         should_split = False
-        # Rule 0: Force split unconditionally on retake restart
-        if is_retake_restart:
+        # Rule 1: Physical respiration pause or stretched onset when current clause has sufficient length
+        if gap >= 0.55 or ((gap >= max_gap or first_w_stretched) and curr_norm_len >= 5):
             should_split = True
-        # Rule 1: Physical respiration pause (gap >= max_gap)
-        elif gap >= max_gap:
+        # Rule 2: Clause duration ceiling reached with micro-pause
+        elif dur >= max_sentence_dur and gap >= 0.12:
             should_split = True
-        # 2. 句子長度已很長且有適度微停頓
-        elif dur >= max_sentence_dur and gap >= 0.20:
-            should_split = True
-        # 3. 句尾標點閉合且微停頓
-        elif any(curr_text.endswith(p) for p in CLOSURE_PUNCT) and gap >= 0.20:
+        # Rule 3: Closure punctuation with micro-pause
+        elif any(curr_text.endswith(p) for p in CLOSURE_PUNCT) and gap >= 0.15:
             should_split = True
 
-        # 4. 場記報幕代號或語系切換防黏合 (例如 BDA82 / CTA 報幕與正片日語/中文分離)
-        is_curr_slate = bool(re.match(r'^[A-Za-z0-9\s\-_]+$', curr_text))
-        is_s_japanese = bool(re.search(r'[぀-ヿ]', s_text))
-        is_curr_japanese = bool(re.search(r'[぀-ヿ]', curr_text))
-        if is_curr_slate and not bool(re.match(r'^[A-Za-z0-9\s\-_]+$', s_text)):
+        # Rule 4: Slate cue or script language switch (e.g. alphanumeric slate vs Japanese/Chinese)
+        is_curr_slate = bool(re.match(r"^[A-Za-z0-9\s\-_]+$", curr_text))
+        is_s_japanese = bool(re.search(r"[぀-ヿ]", s_text))
+        is_curr_japanese = bool(re.search(r"[぀-ヿ]", curr_text))
+        if is_curr_slate and not bool(re.match(r"^[A-Za-z0-9\s\-_]+$", s_text)):
             should_split = True
         elif is_curr_japanese != is_s_japanese:
             should_split = True
 
-        # 5. 聲紋目標有效性跨越防黏合 (場外人員雜音與正片主講人強制斷開)
-        if curr.get('is_target_speaker', True) != s_is_target:
+        # Rule 5: Target speaker validity transition (crew audio vs target host)
+        if curr.get("is_target_speaker", True) != s_is_target:
             should_split = True
 
-        # 6. 訪談說話者交替輪替 (Speaker Turn-taking: 主持人 vs 來賓強制分句)
-        curr_spk = curr.get('speaker_id')
+        # Rule 6: Speaker turn-taking transition
+        curr_spk = curr.get("speaker_id")
         if s_spk and curr_spk and curr_spk != s_spk:
             should_split = True
 
-        # 7. 絕對長停頓物理斷句 (gap >= 1.0s: 防呆保護，主講人若有自我反省/重來，拆為獨立 Sentence)
+        # Rule 7: Unconditional split on pauses >= 1.0s
         if gap >= 1.0:
             should_split = True
 
-        # 連詞防斷保護 (若下個片段開頭是連詞，且非重講、未發生極長停頓或說話者切換，強制黏合)
-        if should_split and not is_retake_restart and gap < 0.90:
-            if curr.get('is_target_speaker', True) == s_is_target and curr.get('speaker_id') == s_spk:
+        # Rule 8: Conjunction attachment protection (commit 0b579f4 invariant)
+        if should_split and gap < 0.85 and dur < max_sentence_dur * 1.4:
+            if curr.get("is_target_speaker", True) == s_is_target and curr.get("speaker_id") == s_spk:
                 if any(s_text.startswith(c) for c in CONJUNCTIONS):
                     should_split = False
 
@@ -299,29 +309,31 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.45, max_sentence_dur
             _compute_sentence_speaker(curr)
             raw_sentences.append(curr)
             curr = {
-                'id': len(raw_sentences) + 1,
-                'start': s_start,
-                'end': s_end,
-                'text': s_text,
-                'words': list(s_words),
-                'orig_segment_ids': [s['id']],
-                'speaker_id': s_spk,
-                'is_target_speaker': s_is_target
+                "id": len(raw_sentences) + 1,
+                "start": s_start,
+                "end": s_end,
+                "text": s_text,
+                "words": list(s_words),
+                "orig_segment_ids": [s["id"]],
+                "speaker_id": s_spk,
+                "is_target_speaker": s_is_target,
             }
             _compute_sentence_speaker(curr)
         else:
-            curr['end'] = s_end
-            curr['text'] = curr['text'] + ' ' + s_text if not curr['text'].endswith((' ', '，', '。')) else curr['text'] + s_text
-            curr['words'].extend(s_words)
-            curr['orig_segment_ids'].append(s['id'])
+            curr["end"] = s_end
+            curr["text"] = (
+                curr["text"] + " " + s_text
+                if not curr["text"].endswith((" ", "，", "。"))
+                else curr["text"] + s_text
+            )
+            curr["words"].extend(s_words)
+            curr["orig_segment_ids"].append(s["id"])
             _compute_sentence_speaker(curr)
-        last_seg_text = s_text
 
     if curr is not None:
         _compute_sentence_speaker(curr)
         raw_sentences.append(curr)
 
-    # 對每個合併後的句子檢查是否含有「帶物理停頓 (>=0.18s) 的句內重講」並安全拆開
     final_sentences = []
     for sent in raw_sentences:
         for sub_sent in _split_sentence_on_paused_restarts(sent):
@@ -630,10 +642,81 @@ def filter_ng_retake_sentences(sentences: list[dict], max_lookahead: int = 3, ma
     return kept
 
 
+def _trim_matched_words_by_transcript(matched_sentences: list[dict], transcript: str) -> list[dict]:
+    """
+    Trim leading and trailing words of matched sentences to match the LLM-selected transcript.
+
+    ASD-STE100:
+    Align the LLM transcript string with the Whisper word timeline.
+    When the LLM omits a leading or trailing stumble from a selected sentence,
+    trim the word list to the matched character boundaries.
+    """
+    if not transcript or not matched_sentences:
+        return matched_sentences
+
+    char_timeline = []
+    for s_idx, s in enumerate(matched_sentences):
+        for w_idx, w in enumerate(s.get("words", [])):
+            w_norm = normalize_text(w.get("word", ""))
+            if not w_norm:
+                continue
+            for ch in w_norm:
+                char_timeline.append((s_idx, w_idx, ch))
+
+    if not char_timeline:
+        return matched_sentences
+
+    tgt_norm = normalize_text(transcript)
+    whisper_str = "".join(item[2] for item in char_timeline)
+    if not tgt_norm or not whisper_str or len(tgt_norm) >= len(whisper_str) * 0.95:
+        return matched_sentences
+
+    matcher = difflib.SequenceMatcher(None, tgt_norm, whisper_str)
+    blocks = [b for b in matcher.get_matching_blocks() if b.size > 0]
+    if not blocks:
+        return matched_sentences
+
+    matched_chars = sum(b.size for b in blocks)
+    if matched_chars < max(3, len(tgt_norm) * 0.60):
+        return matched_sentences
+
+    first_char_pos = blocks[0].b
+    last_char_pos = min(len(char_timeline) - 1, blocks[-1].b + blocks[-1].size - 1)
+
+    first_s_idx, first_w_idx, _ = char_timeline[first_char_pos]
+    last_s_idx, last_w_idx, _ = char_timeline[last_char_pos]
+
+    trimmed = []
+    for s_idx in range(first_s_idx, last_s_idx + 1):
+        orig_s = matched_sentences[s_idx]
+        words = list(orig_s.get("words", []))
+        if not words:
+            trimmed.append(orig_s)
+            continue
+
+        w_start = first_w_idx if s_idx == first_s_idx else 0
+        w_end = (last_w_idx + 1) if s_idx == last_s_idx else len(words)
+        sliced_words = words[w_start:w_end]
+        if not sliced_words:
+            continue
+
+        s_copy = dict(orig_s)
+        s_copy["words"] = sliced_words
+        s_copy["start"] = sliced_words[0]["start"]
+        s_copy["end"] = sliced_words[-1]["end"]
+        s_copy["text"] = "".join(w.get("word", "") for w in sliced_words).strip()
+        trimmed.append(s_copy)
+
+    return trimmed if trimmed else matched_sentences
+
+
 def _split_sentence_words_by_internal_gap(sentence: dict, max_word_gap: float = 0.45) -> list[dict]:
     """
-    若單一 Sentence 內部的單字與單字之間存在明顯看稿發呆停頓 (gap >= max_word_gap)，
-    於該物理靜音區拆分為多個緊湊發音塊 (speech chunks)，使每個停頓都能被聲學引擎收緊。
+    Split a sentence into compact speech chunks when internal word gaps exceed max_word_gap.
+
+    ASD-STE100:
+    Divide a sentence at physical silence gaps (>= max_word_gap) so the acoustic engine
+    can tighten dead air inside a single sentence.
     """
     words = [w for w in sentence.get("words", []) if w.get("is_target_speaker", True)]
     if not words:
@@ -680,16 +763,19 @@ def resolve_clip_sub_units(
     max_word_gap: float = 0.45,
 ) -> list[dict]:
     """
-    將單一 Clip 決策解析為一或多個「無句間長空白」的緊湊語音子片段 (Sub-units)。
-    1. 優先讀取 `sentence_ids` 陣列；若無則讀取 `start_sentence_id`..`end_sentence_id` 或時間範圍。
-    2. 尊重 Gemini 選取的所有 Sentence ID，不執行破壞性字串刪除 (filter_ng_retake_sentences)。
-    3. 只要相鄰句子之間存在 >= max_internal_gap (0.40s) 的看稿停頓、
-       或句內單字間存在 >= max_word_gap (0.45s) 的空白停頓，即於該物理靜音區拆開為獨立子片段，
-       交由後續 `refine_speech_bounds_locked` 逐一收緊頭尾空白。
+    Resolve a single EDL clip into one or more compact speech sub-units.
+
+    ASD-STE100:
+    1. Read `sentence_ids` first, or fall back to `start_sentence_id`..`end_sentence_id`.
+    2. Align word boundaries to `clip_data["transcript"]` when the LLM trims a boundary stumble.
+    3. Preserve all LLM-selected sentences without Python string-similarity deletion.
+    4. Coalesce consecutive sentence IDs when the physical gap is below max_internal_gap (0.40s),
+       and split when an ID is skipped or when a pause is >= max_internal_gap.
     """
     if not whisper_units:
         t_first, t_last, prev_end, next_start = align_clip_with_whisper(whisper_units, clip_data, total_dur)
         return [{
+            "sentence_ids": [],
             "t_first": t_first,
             "t_last": t_last,
             "prev_sentence_end": prev_end,
@@ -726,6 +812,7 @@ def resolve_clip_sub_units(
     if not matched:
         t_first, t_last, prev_end, next_start = align_clip_with_whisper(whisper_units, clip_data, total_dur)
         return [{
+            "sentence_ids": [],
             "t_first": t_first,
             "t_last": t_last,
             "prev_sentence_end": prev_end,
@@ -733,31 +820,33 @@ def resolve_clip_sub_units(
             "transcript": clip_data.get("transcript", "") or clip_data.get("content", ""),
         }]
 
-    # 過濾非目標主講人句子（如場外人員喊口令）
+    # Filter out off-screen crew sentences (is_target_speaker == False)
     target_matched = [s for s in matched if s.get("is_target_speaker", True)]
     if target_matched:
         matched = target_matched
 
-    # Do not execute filter_ng_retake_sentences here.
-    # Gemini has already selected the intended takes.
+    # Trim leading/trailing words if LLM transcript excluded a boundary stumble
+    clip_transcript = clip_data.get("transcript", "") or clip_data.get("content", "")
+    if clip_transcript:
+        matched = _trim_matched_words_by_transcript(matched, clip_transcript)
 
-    # 拆解為細粒度發音塊（消除句內 >= 0.45s 的空白停頓）
+    # Split sentences at internal dead-air pauses (>= max_word_gap)
     fine_chunks = []
     for s in matched:
         fine_chunks.extend(_split_sentence_words_by_internal_gap(s, max_word_gap=max_word_gap))
 
-    fine_chunks = filter_ng_retake_sentences(fine_chunks, max_lookahead=2, max_time_span=20.0)
     if not fine_chunks:
         t_first, t_last, prev_end, next_start = align_clip_with_whisper(whisper_units, clip_data, total_dur)
         return [{
+            "sentence_ids": [],
             "t_first": t_first,
             "t_last": t_last,
             "prev_sentence_end": prev_end,
             "next_sentence_start": next_start,
-            "transcript": clip_data.get("transcript", "") or clip_data.get("content", ""),
+            "transcript": clip_transcript,
         }]
 
-    # 將相鄰且間隔 < max_internal_gap (0.40s)、且未跳過句子的發音塊合併；若間隔 >= 0.40s 或跳過 NG 句則拆開收緊
+    # Coalesce consecutive chunks when gap < max_internal_gap and no Sentence ID was skipped
     grouped_units = []
     cur_group = {
         "sentence_ids": [fine_chunks[0]["sentence_id"]],
@@ -770,7 +859,7 @@ def resolve_clip_sub_units(
         gap = ch["t_first"] - cur_group["t_last"]
         prev_sid = cur_group["sentence_ids"][-1]
         cur_sid = ch["sentence_id"]
-        skipped_sentence = (cur_sid > prev_sid + 1)
+        skipped_sentence = cur_sid > prev_sid + 1
 
         if gap >= max_internal_gap or skipped_sentence:
             grouped_units.append(cur_group)
@@ -788,20 +877,17 @@ def resolve_clip_sub_units(
 
     grouped_units.append(cur_group)
 
-    # 為每個子片段計算相鄰聲學保護邊界 (prev_sentence_end, next_sentence_start)
     all_bounds = [(float(u.get("start", 0.0)), float(u.get("end", 0.0))) for u in whisper_units]
     sub_units = []
     for idx, g in enumerate(grouped_units):
         t_f = g["t_first"]
         t_l = g["t_last"]
 
-        # 尋找緊鄰於 t_f 之前的聲音結束點
         prev_ends = [b_end for (_, b_end) in all_bounds if b_end <= t_f + 0.02]
         if idx > 0:
             prev_ends.append(grouped_units[idx - 1]["t_last"])
         prev_end = max(prev_ends) if prev_ends else None
 
-        # 尋找緊鄰於 t_l 之後的聲音開始點
         next_starts = [b_start for (b_start, _) in all_bounds if b_start >= t_l - 0.02]
         if idx + 1 < len(grouped_units):
             next_starts.append(grouped_units[idx + 1]["t_first"])
@@ -809,14 +895,61 @@ def resolve_clip_sub_units(
 
         sub_text = " ".join(t for t in g["texts"] if t).strip()
         sub_units.append({
+            "sentence_ids": list(g["sentence_ids"]),
             "t_first": t_f,
             "t_last": t_l,
             "prev_sentence_end": prev_end,
             "next_sentence_start": next_start,
-            "transcript": sub_text or (clip_data.get("transcript", "") or clip_data.get("content", "")),
+            "transcript": sub_text or clip_transcript,
         })
 
     return sub_units
+
+
+def coalesce_adjacent_sub_units(
+    expanded_units: list[dict],
+    max_internal_gap: float = 0.40,
+) -> list[dict]:
+    """
+    Coalesce consecutive sub-units across clip boundaries when no sentence ID is skipped
+    and the physical pause is below max_internal_gap.
+
+    ASD-STE100:
+    Prevent artificial jump-cuts and margin collisions when the LLM splits a continuous take
+    across two adjacent EDL clip entries.
+    """
+    if len(expanded_units) <= 1:
+        return list(expanded_units)
+
+    coalesced = [dict(expanded_units[0])]
+    for unit in expanded_units[1:]:
+        prev = coalesced[-1]
+        prev_sids = prev.get("sentence_ids") or []
+        curr_sids = unit.get("sentence_ids") or []
+
+        gap = float(unit.get("t_first", 0.0)) - float(prev.get("t_last", 0.0))
+        is_contiguous_sid = (
+            bool(prev_sids)
+            and bool(curr_sids)
+            and 0 <= (int(curr_sids[0]) - int(prev_sids[-1])) <= 1
+        )
+
+        if is_contiguous_sid and 0.0 <= gap < max_internal_gap:
+            merged_sids = list(prev_sids)
+            for sid in curr_sids:
+                if sid not in merged_sids:
+                    merged_sids.append(sid)
+            prev["sentence_ids"] = merged_sids
+            prev["t_last"] = float(unit["t_last"])
+            prev["next_sentence_start"] = unit.get("next_sentence_start")
+            prev_text = (prev.get("transcript") or "").strip()
+            curr_text = (unit.get("transcript") or "").strip()
+            if curr_text and curr_text not in prev_text:
+                prev["transcript"] = f"{prev_text} {curr_text}".strip()
+        else:
+            coalesced.append(dict(unit))
+
+    return coalesced
 
 
 def calculate_active_script_window(

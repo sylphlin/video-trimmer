@@ -50,8 +50,8 @@ from .render import probe_video, render_cut_video
 from .transcribe import (
     align_clip_with_whisper,
     calculate_active_script_window,
+    coalesce_adjacent_sub_units,
     detect_chunk_boundaries,
-    is_earlier_sentence_ng_retake,
     resolve_clip_sub_units,
     transcribe_video_whisper,
 )
@@ -296,7 +296,6 @@ def _run(args):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     audio, sr = sf.read(str(temp_wav))
 
-    # 5a. 將每個宏觀 Clip 拆解為去除中間長空白 (>=0.40s) 的細粒度語音子片段
     expanded_units = []
     for c in model_edl.get("final_edl", []):
         sub_units = resolve_clip_sub_units(whisper_units, c, total_dur)
@@ -305,6 +304,7 @@ def _run(args):
             expanded_units.append({
                 "parent_clip": c,
                 "topic": topic_label,
+                "sentence_ids": su.get("sentence_ids", []),
                 "t_first": su["t_first"],
                 "t_last": su["t_last"],
                 "prev_sentence_end": su["prev_sentence_end"],
@@ -312,8 +312,8 @@ def _run(args):
                 "transcript": su["transcript"],
             })
 
-    # Step 5b removed: Do not delete units with Python heuristics.
-    filtered_units = expanded_units
+    # Coalesce adjacent continuous sub-units across clip boundaries when gap < 0.40s and no ID is skipped
+    filtered_units = coalesce_adjacent_sub_units(expanded_units)
 
     # 5c. 針對每個保留子片段獨立執行聲學包絡收緊與微呼吸邊界鎖定
     refined_edl = []
