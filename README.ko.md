@@ -11,7 +11,7 @@
 
 ## 개요 (Overview)
 
-**Video Trimmer**는 토킹헤드 비디오, 튜토리얼 및 발표 녹화물을 위한 AI 자동 러프컷 및 트리밍 엔진입니다. **Google Vertex AI Gemini 3.8 Flash** 멀티모달 비디오 추론, **Whisper 단어 단위 음향 타임스탬프**(`mlx-whisper`), **5계층 통합 아키텍처(5-Layer Unified Architecture)** 및 **음향 온셋 스내핑(Acoustic Onset Snapping)**을 결합하여 NG 테이크, 말더듬, 무음 구간을 제거하면서 연속적인 문장 흐름을 유지하고 NLE 타임라인(`.xml`, `.fcpxml`, `.edl`, `.csv`), 8차원 품질 감사 보고서(`.md`, `.json`) 및 렌더링된 MP4 비디오를 생성합니다.
+**Video Trimmer**는 토킹헤드 비디오, 튜토리얼 및 발표 녹화물을 위한 AI 자동 러프컷 및 트리밍 엔진입니다. **Google Vertex AI Gemini 3.8 Flash** 멀티모달 비디오 추론, **Whisper 단어 단위 음향 타임스탬프**(`mlx-whisper`), **5계층 통합 아키텍처(5-Layer Unified Architecture)** 및 **음향 온셋 스내핑(Acoustic Onset Snapping)**을 결합하여 NG 테이크, 말더듬, 무음 구간을 제거하면서 연속적인 문장 흐름을 유지하고 NLE 타임라인(`.xml`, `.fcpxml`, `.csv`), 8차원 품질 감사 보고서(`.md`, `.json`) 및 렌더링된 MP4 비디오를 생성합니다.
 
 ---
 
@@ -59,8 +59,8 @@ flowchart TD
     end
 
     subgraph Deliverables["최종 산출물 (<input_dir>/output/)"]
-        OUT_MP4["산출물: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox 하드웨어 가속 + 15ms 등전력 마이크로 페이드)"]:::outputStyle
-        OUT_NLE["산출물: 멀티 NLE 프로젝트 타임라인<br/>(.xml / .fcpxml / .edl / .csv)"]:::outputStyle
+        OUT_MP4["산출물: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox 하드웨어 가속 + 20ms 등전력 마이크로 페이드)"]:::outputStyle
+        OUT_NLE["산출물: 멀티 NLE 프로젝트 타임라인<br/>(.xml / .fcpxml / .csv)"]:::outputStyle
         OUT_REP["산출물: 8차원 품질 감사 리포트<br/>(_edl_report.md & _edl_report.json)"]:::outputStyle
     end
 
@@ -89,10 +89,10 @@ flowchart TD
    - 인접한 클립이 연속된 `Sentence ID`(중간에 건너뛴 NG 문장이 없고 경계가 리테이크로 잘리지 않은 경우)이고 물리적 단어 간격이 `< 0.40s`인 경우 단일 연속 클립으로 병합하여 문장 내부의 불필요한 점프컷을 제거합니다.
 5. **계층 5: 결정론적 타임라인 자가 치유 및 8차원 듀얼 트랙 품질 감사 (`edl_auditor.py`)**:
    - 시간순 단조 증가(`source_in < source_out` 및 `c[i].source_out <= c[i+1].source_in`)를 보장하고 내포된 중복 클립 제거, 경계 미세 중첩 해소, `source_out >= t_last` 보장, `< 0.45s` 마이크로 클립 병합을 수행하며 Whisper와 Gemini 듀얼 트랙 비교를 통해 `agent_verdict` 품질 게이트가 포함된 감사 보고서(`_edl_report.md` / `_edl_report.json`)를 생성합니다.
-6. **음향 온셋 스내핑, 15 ms 등전력 마이크로 크로스페이드 및 키프레임 하드웨어 가속 렌더링 (`acoustic.py` / `render.py`)**:
-   - 성대 진동 80 ms 전에 컷 포인트를 배치하며, 클립별 `-ss` / `-to` 선행 키프레임 고속 탐색(불필요 구간 디코딩 생략), Apple Silicon `VideoToolbox` 하드웨어 가속(`-hwaccel videotoolbox` + `h264_videotoolbox`, `libx264` 자동 폴백 지원), 1초 GOP(`-g 30`) 및 15 ms 마이크로 페이드(`afade=t=in:d=0.015:curve=iqsin` 및 `afade=t=out:d=0.015:curve=qsin`)를 적용합니다.
+6. **음향 온셋 스내핑, 20 ms 등전력 마이크로 크로스페이드 및 키프레임 하드웨어 가속 렌더링 (`acoustic.py` / `render.py`)**:
+   - 성대 진동 80 ms 전에 컷 포인트를 배치하며, 클립별 `-ss` / `-to` 선행 키프레임 고속 탐색(불필요 구간 디코딩 생략), Apple Silicon `VideoToolbox` 하드웨어 가속(`-hwaccel videotoolbox` + `h264_videotoolbox`, `libx264` 자동 폴백 지원), 1초 GOP(`-g 30`) 및 20 ms 마이크로 페이드(`afade=t=in:d=0.020:curve=iqsin` 및 `afade=t=out:d=0.020:curve=qsin`)를 적용합니다.
 7. **Agent Plugins 1.0 표준 아키텍처 및 멀티 NLE 타임라인 지원**:
-   - 핵심 스크립트와 프롬프트는 `skills/video-trimmer/scripts/` 및 `skills/video-trimmer/prompts/`(SSOT)에 위치하며 에이전트 전용 CLI 옵션은 `skills/video-trimmer/SKILL.md`에 정의되어 있습니다. **FCP7 XML**, **FCPXML**, **CMX 3600 EDL** 및 **CSV**를 내보냅니다.
+   - 핵심 스크립트와 프롬프트는 `skills/video-trimmer/scripts/` 및 `skills/video-trimmer/prompts/`(SSOT)에 위치하며 에이전트 전용 CLI 옵션은 `skills/video-trimmer/SKILL.md`에 정의되어 있습니다. **FCP7 XML**, **FCPXML** 및 **CSV**를 내보냅니다.
 
 ---
 

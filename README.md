@@ -11,7 +11,7 @@
 
 ## Overview
 
-**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 3.8 Flash** multimodal video reasoning with **Whisper Word-Level Acoustic Ground Truth** (`mlx-whisper`), a **5-Layer Unified Architecture**, and **Acoustic Onset Snapping**. Each run removes bad takes, stutters, and dead air without truncating continuous speech, then exports NLE project timelines (`.xml`, `.fcpxml`, `.edl`, `.csv`), an 8-dimension quality audit report (`.md`, `.json`), and a rendered MP4 video.
+**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 3.8 Flash** multimodal video reasoning with **Whisper Word-Level Acoustic Ground Truth** (`mlx-whisper`), a **5-Layer Unified Architecture**, and **Acoustic Onset Snapping**. Each run removes bad takes, stutters, and dead air without truncating continuous speech, then exports NLE project timelines (`.xml`, `.fcpxml`, `.csv`), an 8-dimension quality audit report (`.md`, `.json`), and a rendered MP4 video.
 
 ---
 
@@ -59,8 +59,8 @@ flowchart TD
     end
 
     subgraph Deliverables["Final Deliverables (<input_dir>/output/)"]
-        OUT_MP4["Deliverable: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox Hardware Render + 15ms Equal-Power Micro-Fade)"]:::outputStyle
-        OUT_NLE["Deliverable: Multi-NLE Project Timelines<br/>(.xml / .fcpxml / .edl / .csv)"]:::outputStyle
+        OUT_MP4["Deliverable: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox Hardware Render + 20ms Equal-Power Micro-Fade)"]:::outputStyle
+        OUT_NLE["Deliverable: Multi-NLE Project Timelines<br/>(.xml / .fcpxml / .csv)"]:::outputStyle
         OUT_REP["Deliverable: 8-Dimension Quality Audit Reports<br/>(_edl_report.md & _edl_report.json)"]:::outputStyle
     end
 
@@ -94,10 +94,10 @@ flowchart TD
    - Enforces strict chronological monotonicity (`source_in < source_out` and `c[i].source_out <= c[i+1].source_in`), prunes nested/contained redundant clips, guarantees `source_out >= t_last` (plosive tail floor), merges `< 0.45 s` flash-frame micro-clips, and generates an 8-dimension dual-track (Whisper + Gemini) rough-cut audit report (`_edl_report.md` and `_edl_report.json`) with a top-level `agent_verdict` quality gate.
 6. **Acoustic Onset Snapping & Plosive Tail Defense (`acoustic.py`)**:
    - Places cut-in points 80 ms before vocal cord vibration and dynamically calculates lead-in/lead-out margins from presenter Characters Per Second (CPS) while enforcing `true_speech_end >= t_last`.
-7. **15 ms Audio Equal-Power Micro-Crossfade & Keyframe Hardware Rendering (`render.py`)**:
-   - Uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`) to skip discarded footage without decoding it, combined with Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 15 ms equal-power micro-fades (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=qsin`) at every cut boundary.
+7. **20 ms Audio Equal-Power Micro-Crossfade & Keyframe Hardware Rendering (`render.py`)**:
+   - Uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`) to skip discarded footage without decoding it, combined with Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 20 ms equal-power micro-fades (`afade=t=in:d=0.020:curve=iqsin` and `afade=t=out:d=0.020:curve=qsin`) at every cut boundary.
 8. **Multi-NLE Timeline Interoperability (`exporters.py`)**:
-   - Exports frame-accurate **Final Cut Pro 7 XML** (`.xml` for Adobe Premiere Pro and DaVinci Resolve), **Apple Final Cut Pro FCPXML** (`.fcpxml`), **CMX 3600 EDL** (`.edl`), and **CSV** cut lists across standard frame rates (`23.976` to `60` fps).
+   - Exports frame-accurate **Final Cut Pro 7 XML** (`.xml` for Adobe Premiere Pro and DaVinci Resolve), **Apple Final Cut Pro FCPXML** (`.fcpxml`), and **CSV** cut lists across standard frame rates (`23.976` to `60` fps).
 
 ---
 
@@ -121,7 +121,7 @@ video-trimmer/
 │       │   ├── edl_auditor.py               # Surgical micro-window repair, timing sanitizer, and 8-D audit
 │       │   ├── gemini_client.py             # Vertex AI (ADC) client and dual-mode prompt builder
 │       │   ├── gcs_utils.py                 # Cloud Storage staging, Google Drive cache, and CJK recovery
-│       │   ├── exporters.py                 # FCP7 XML, FCPXML, EDL, and CSV timeline exporters
+│       │   ├── exporters.py                 # FCP7 XML, FCPXML, and CSV timeline exporters
 │       │   └── render.py                    # ffprobe inspection and FFmpeg micro-crossfade rendering
 │       └── prompts/                         # Canonical prompt specifications (SSOT)
 │           └── video_cut_prompt.md          # Dual-mode take arbitration & 5-rule subtraction prompt
@@ -132,7 +132,7 @@ video-trimmer/
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python dependencies
-└── tests/                                   # Offline unit test suite (101 tests)
+└── tests/                                   # Offline unit test suite (103 tests)
 ```
 
 ---
@@ -247,10 +247,10 @@ Pass a Google Drive URL directly without manually downloading large video files 
 
 For an input video `raw_footage.mp4`, the agent automatically creates an `output/` subdirectory next to the source video and delivers:
 
-1. **`output/raw_footage_<tag>_trimmed.mp4`**: Rendered rough-cut video with 15 ms equal-power audio crossfades.
+1. **`output/raw_footage_<tag>_trimmed.mp4`**: Rendered rough-cut video with 20 ms equal-power audio crossfades.
 2. **`output/raw_footage_<tag>_edl.xml`**: Final Cut Pro 7 XML timeline for **Adobe Premiere Pro** and **DaVinci Resolve**.
 3. **`output/raw_footage_<tag>_edl.fcpxml`**: Apple FCPXML timeline for **Final Cut Pro**.
-4. **`output/raw_footage_<tag>_edl.edl`** & **`_edl.csv`**: CMX 3600 EDL and spreadsheet cut table with editorial notes.
+4. **`output/raw_footage_<tag>_edl.json`** & **`_edl.csv`**: Structured decision metadata and spreadsheet cut table with editorial notes.
 5. **`output/raw_footage_<tag>_edl_report.md`** & **`_edl_report.json`**: 8-dimension rough-cut quality audit report with top-level `agent_verdict`.
 6. **`output/raw_footage_whisper_raw.json`**: Cached Whisper word-level transcript.
 
@@ -267,7 +267,7 @@ For an input video `raw_footage.mp4`, the agent automatically creates an `output
 
 ## Unit Testing
 
-Run the offline test suite (101 tests) before committing changes:
+Run the offline test suite (103 tests) before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v

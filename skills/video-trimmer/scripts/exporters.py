@@ -1,11 +1,40 @@
-"""輸出格式產生：FCP 7 XML、FCPXML、CSV。"""
+"""NLE timeline and cut-table exporters: FCP 7 XML (.xml), Apple FCPXML (.fcpxml), and CSV (.csv).
+
+ASD-STE100:
+Generate frame-accurate NLE timelines for Adobe Premiere Pro, DaVinci Resolve, and Apple Final Cut Pro
+across standard cinema and broadcast frame rates (23.976 to 60 fps).
+"""
 
 from pathlib import Path
 
 
-def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976):
-    """產生 Premiere Pro / DaVinci Resolve 相容的 FCP 7 XML (xmeml v4)"""
+def _is_ntsc_rate(fps: float) -> bool:
+    """Return True when fps is a fractional NTSC rate (23.976, 29.97, 59.94)."""
+    return abs(fps - round(fps)) > 0.001
+
+
+def _fcpxml_rate_spec(fps: float) -> tuple[int, int, str]:
+    """
+    Return (frame_num, frame_den, format_tag) for FCPXML rational frame durations.
+
+    Each frame duration equals frame_num / frame_den seconds.
+    """
     timebase = int(round(fps))
+    if _is_ntsc_rate(fps):
+        if timebase == 24:
+            return 1001, 24000, "2398"
+        if timebase == 30:
+            return 1001, 30000, "2997"
+        if timebase == 60:
+            return 1001, 60000, "5994"
+        return 1001, max(1000, timebase * 1000), f"{timebase}p"
+    return 100, max(100, timebase * 100), f"{timebase}p"
+
+
+def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976):
+    """Generate a Final Cut Pro 7 XML (xmeml v4) timeline for Premiere Pro and DaVinci Resolve."""
+    timebase = max(1, int(round(fps)))
+    ntsc_flag = "TRUE" if _is_ntsc_rate(fps) else "FALSE"
 
     def s2f(sec):
         return int(round(sec * fps))
@@ -19,12 +48,12 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         '    <children>',
         '      <sequence id="sequence-1">',
         f'        <name>{video_path.stem}_TrimmerCut</name>',
-        f'        <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
+        f'        <rate><timebase>{timebase}</timebase><ntsc>{ntsc_flag}</ntsc></rate>',
         '        <media>',
         '          <video>',
         '            <format>',
         '              <samplecharacteristics>',
-        f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
+        f'                <rate><timebase>{timebase}</timebase><ntsc>{ntsc_flag}</ntsc></rate>',
         f'                <width>{width}</width>',
         f'                <height>{height}</height>',
         '                <pixelaspectratio>square</pixelaspectratio>',
@@ -45,7 +74,7 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         xml_lines.extend([
             f'              <clipitem id="clipitem-v{idx+1}">',
             f'                <name>Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}</name>',
-            f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
+            f'                <rate><timebase>{timebase}</timebase><ntsc>{ntsc_flag}</ntsc></rate>',
             f'                <in>{in_frame}</in>',
             f'                <out>{out_frame}</out>',
             f'                <start>{start_frame}</start>',
@@ -53,7 +82,7 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
             f'                <file id="file-1">',
             f'                  <name>{video_path.name}</name>',
             f'                  <pathurl>file://localhost{video_path.resolve()}</pathurl>',
-            f'                  <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
+            f'                  <rate><timebase>{timebase}</timebase><ntsc>{ntsc_flag}</ntsc></rate>',
             f'                  <duration>{s2f(total_source_dur)}</duration>',
             '                </file>',
             '              </clipitem>'
@@ -78,7 +107,7 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         xml_lines.extend([
             f'              <clipitem id="clipitem-a{idx+1}">',
             f'                <name>Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}</name>',
-            f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
+            f'                <rate><timebase>{timebase}</timebase><ntsc>{ntsc_flag}</ntsc></rate>',
             f'                <in>{in_frame}</in>',
             f'                <out>{out_frame}</out>',
             f'                <start>{start_frame}</start>',
@@ -100,21 +129,52 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
     Path(output_xml_path).write_text('\n'.join(xml_lines), encoding='utf-8')
 
 
-def generate_fcpxml(edl, video_path, total_source_dur, total_out_dur, output_fcpxml_path, fps=23.976):
-    """產生 Final Cut Pro X 相容的 FCPXML (v1.9)"""
-    def sec_to_fraction(sec):
-        frames = int(round(sec * 24000 / 1001))
-        return f"{frames * 1001}/24000s"
+def generate_fcpxml(
+    edl,
+    video_path,
+    total_source_dur,
+    total_out_dur,
+    output_fcpxml_path,
+    fps=23.976,
+    width=1920,
+    height=1080,
+):
+    """Generate an Apple Final Cut Pro FCPXML (v1.9) timeline across 23.976 to 60 fps."""
+    frame_num, frame_den, rate_tag = _fcpxml_rate_spec(fps)
+    exact_fps = frame_den / frame_num
 
-    total_out_frac = sec_to_fraction(total_out_dur)
-    total_src_frac = sec_to_fraction(total_source_dur)
+    def sec_to_frames(sec):
+        return int(round(sec * exact_fps))
+
+    def frames_to_fraction(frames):
+        return f"{frames * frame_num}/{frame_den}s"
+
+    total_src_frac = frames_to_fraction(sec_to_frames(total_source_dur))
+
+    clip_elements = []
+    offset_frames = 0
+    for clip in edl:
+        clip_dur = clip.get("duration", float(clip["source_out"]) - float(clip["source_in"]))
+        start_frames = sec_to_frames(clip["source_in"])
+        dur_frames = max(1, sec_to_frames(clip_dur))
+        offset_frac = "0s" if offset_frames == 0 else frames_to_fraction(offset_frames)
+        start_frac = frames_to_fraction(start_frames)
+        dur_frac = frames_to_fraction(dur_frames)
+        offset_frames += dur_frames
+        name = f"Clip_{clip['clip_id']:02d}_{clip['topic'][:15]}"
+        clip_elements.append(
+            f'            <asset-clip name="{name}" ref="r2" offset="{offset_frac}" start="{start_frac}" duration="{dur_frac}"/>'
+        )
+
+    seq_frames = offset_frames if offset_frames > 0 else sec_to_frames(total_out_dur)
+    total_out_frac = frames_to_fraction(seq_frames)
 
     xml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<!DOCTYPE fcpxml>',
         '<fcpxml version="1.9">',
         '  <resources>',
-        '    <format id="r1" name="FFVideoFormat1080p2398" frameDuration="1001/24000s" width="1920" height="1080"/>',
+        f'    <format id="r1" name="FFVideoFormat{height}p{rate_tag}" frameDuration="{frame_num}/{frame_den}s" width="{width}" height="{height}"/>',
         f'    <asset id="r2" name="{video_path.name}" src="file://localhost{video_path.resolve()}" start="0s" duration="{total_src_frac}" hasVideo="1" hasAudio="1" format="r1"/>',
         '  </resources>',
         '  <library>',
@@ -123,14 +183,7 @@ def generate_fcpxml(edl, video_path, total_source_dur, total_out_dur, output_fcp
         f'        <sequence format="r1" duration="{total_out_frac}">',
         '          <spine>'
     ]
-
-    for clip in edl:
-        clip_dur = clip["duration"]
-        start_frac = sec_to_fraction(clip["source_in"])
-        dur_frac = sec_to_fraction(clip_dur)
-        name = f"Clip_{clip['clip_id']:02d}_{clip['topic'][:15]}"
-        xml.append(f'            <asset-clip name="{name}" ref="r2" offset="0s" start="{start_frac}" duration="{dur_frac}"/>')
-
+    xml.extend(clip_elements)
     xml.extend([
         '          </spine>',
         '        </sequence>',
@@ -144,7 +197,7 @@ def generate_fcpxml(edl, video_path, total_source_dur, total_out_dur, output_fcp
 
 
 def generate_edl_csv(edl, csv_path):
-    """輸出 EDL 表格清單 (CSV, UTF-8 BOM 供 Excel 開啟)"""
+    """Write the EDL cut table as a UTF-8 with BOM CSV file."""
     with open(csv_path, "w", encoding="utf-8-sig") as f:
         f.write("Clip_ID,Topic,Source_In,Source_Out,Duration,CPS,In_Margin,Out_Margin,Transcript,Visual_Check,Audio_Check\n")
         for c in edl:

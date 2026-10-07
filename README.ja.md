@@ -11,7 +11,7 @@
 
 ## 概要 (Overview)
 
-**Video Trimmer** は、トーク動画、チュートリアル、プレゼンテーション録画向けの AI 自動ラフカット＆トリミングエンジンです。**Google Vertex AI Gemini 3.8 Flash** のマルチモーダル動画推論、**Whisper 単語レベル音響タイムスタンプ**（`mlx-whisper`）、**5 レイヤー統合アーキテクチャ**、および **音響オンセット・スナッピング** を組み合わせ、NG テイクや言い淀み、無音区間を自動除去しながら自然な連続発話を維持し、NLE タイムライン（`.xml`, `.fcpxml`, `.edl`, `.csv`）、8 次元品質監査レポート（`.md`, `.json`）、および MP4 動画を出力します。
+**Video Trimmer** は、トーク動画、チュートリアル、プレゼンテーション録画向けの AI 自動ラフカット＆トリミングエンジンです。**Google Vertex AI Gemini 3.8 Flash** のマルチモーダル動画推論、**Whisper 単語レベル音響タイムスタンプ**（`mlx-whisper`）、**5 レイヤー統合アーキテクチャ**、および **音響オンセット・スナッピング** を組み合わせ、NG テイクや言い淀み、無音区間を自動除去しながら自然な連続発話を維持し、NLE タイムライン（`.xml`, `.fcpxml`, `.csv`）、8 次元品質監査レポート（`.md`, `.json`）、および MP4 動画を出力します。
 
 ---
 
@@ -59,8 +59,8 @@ flowchart TD
     end
 
     subgraph Deliverables["最終成果物 (<input_dir>/output/)"]
-        OUT_MP4["成果物: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox ハードウェア高速出力 + 15ms 等パワーマイクロフェード)"]:::outputStyle
-        OUT_NLE["成果物: マルチ NLE プロジェクトタイムライン<br/>(.xml / .fcpxml / .edl / .csv)"]:::outputStyle
+        OUT_MP4["成果物: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox ハードウェア高速出力 + 20ms 等パワーマイクロフェード)"]:::outputStyle
+        OUT_NLE["成果物: マルチ NLE プロジェクトタイムライン<br/>(.xml / .fcpxml / .csv)"]:::outputStyle
         OUT_REP["成果物: 8 次元品質監査レポート<br/>(_edl_report.md & _edl_report.json)"]:::outputStyle
     end
 
@@ -89,10 +89,10 @@ flowchart TD
    - 隣接クリップが連続する `Sentence ID`（スキップされた NG 文がなく、境界がリテイク用にトリミングされていない場合）であり、単語間ギャップが `< 0.40s` の場合、単一の連続クリップに自動統合し、文中の不自然なジャンプカットを排除します。
 5. **レイヤー 5：決定論的タイムライン自己修復＆ 8 次元デュアルトラック品質監査 (`edl_auditor.py`)**：
    - 時系列の厳密な単調増加（`source_in < source_out` および `c[i].source_out <= c[i+1].source_in`）を強制し、内包された冗長クリップの除去、境界の微小重複解消、`source_out >= t_last` の保証、`< 0.45s` のマイクロクリップ統合を行い、Whisper と Gemini のデュアルトラック比較による `agent_verdict` 品質ゲート付き監査レポート（`_edl_report.md` / `_edl_report.json`）を出力します。
-6. **音響オンセット・スナッピング、15 ms 等パワー音声マイクロクロスフェード＆キーフレーム・ハードウェア高速レンダリング (`acoustic.py` / `render.py`)**：
-   - 声帯振動の 80 ms 前にカット点を配置し、各クリップで `-ss` / `-to` 前置キーフレーム高速シーク（NG 区間のデコード省略）、Apple Silicon `VideoToolbox` ハードウェア加減速（`-hwaccel videotoolbox` + `h264_videotoolbox`、`libx264` 自動フォールバック付き）、1 秒 GOP（`-g 30`）、および 15 ms マイクロフェード（`afade=t=in:d=0.015:curve=iqsin` / `afade=t=out:d=0.015:curve=qsin`）を適用します。
+6. **音響オンセット・スナッピング、20 ms 等パワー音声マイクロクロスフェード＆キーフレーム・ハードウェア高速レンダリング (`acoustic.py` / `render.py`)**：
+   - 声帯振動の 80 ms 前にカット点を配置し、各クリップで `-ss` / `-to` 前置キーフレーム高速シーク（NG 区間のデコード省略）、Apple Silicon `VideoToolbox` ハードウェア加減速（`-hwaccel videotoolbox` + `h264_videotoolbox`、`libx264` 自動フォールバック付き）、1 秒 GOP（`-g 30`）、および 20 ms マイクロフェード（`afade=t=in:d=0.020:curve=iqsin` / `afade=t=out:d=0.020:curve=qsin`）を適用します。
 7. **Agent Plugins 1.0 準拠構造とマルチ NLE タイムライン出力**：
-   - コアスクリプトとプロンプトは `skills/video-trimmer/scripts/` および `skills/video-trimmer/prompts/`（SSOT）に配置され、エージェント用 CLI オプションは `skills/video-trimmer/SKILL.md` に定義されています。**FCP7 XML**、**FCPXML**、**CMX 3600 EDL**、**CSV** を出力します。
+   - コアスクリプトとプロンプトは `skills/video-trimmer/scripts/` および `skills/video-trimmer/prompts/`（SSOT）に配置され、エージェント用 CLI オプションは `skills/video-trimmer/SKILL.md` に定義されています。**FCP7 XML**、**FCPXML**、および **CSV** を出力します。
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: video-trimmer
-description: AI-Powered Smart Video Trimmer and rough-cut engine adhering to Agent Skills Specification. Features Gemini 3.8 Flash Multimodal Video Understanding (native video, no hallucinated cuts, last-take-wins), Whisper Word-Level Acoustic Ground Truth (Apple Silicon Metal GPU via mlx-whisper), Acoustic Onset Snapping (Smart Gap Shortening), 15ms Audio Equal-Power Micro-Crossfade, and multi-format NLE Project Export (Premiere Pro XML, DaVinci Resolve XML, Final Cut Pro FCPXML).
+description: AI-Powered Smart Video Trimmer and rough-cut engine adhering to Agent Skills Specification. Features Gemini 3.8 Flash Multimodal Video Understanding (native video, no hallucinated cuts, last-take-wins), Whisper Word-Level Acoustic Ground Truth (Apple Silicon Metal GPU via mlx-whisper), Acoustic Onset Snapping (Smart Gap Shortening), 20ms Audio Equal-Power Micro-Crossfade, and multi-format NLE Project Export (Premiere Pro XML, DaVinci Resolve XML, Final Cut Pro FCPXML).
 metadata:
   version: "1.0.0"
   author: "sylphlin"
@@ -13,7 +13,7 @@ metadata:
 
 AI-Powered Smart Video Trimmer and rough-cut engine adhering to the open [Agent Skills Specification](https://agentskills.io/specification).
 
-Tailored for talking-head videos, tech explainers, video podcasts, tutorials, and multi-take raw footage. Combines **Gemini 3.8 Flash Multimodal Video Understanding** with local **Whisper Word-Level Acoustic Ground Truth** (with Apple Silicon Metal GPU acceleration via `mlx-whisper`), **Acoustic Onset Snapping (Smart Gap Shortening)**, and **15ms Audio Equal-Power Micro-Crossfades**.
+Tailored for talking-head videos, tech explainers, video podcasts, tutorials, and multi-take raw footage. Combines **Gemini 3.8 Flash Multimodal Video Understanding** with local **Whisper Word-Level Acoustic Ground Truth** (with Apple Silicon Metal GPU acceleration via `mlx-whisper`), **Acoustic Onset Snapping (Smart Gap Shortening)**, and **20ms Audio Equal-Power Micro-Crossfades**.
 
 ---
 
@@ -65,7 +65,7 @@ video-trimmer/
    - **Mode B (No `--script`)**: Unscripted Intent-Window arbitration pruning abandoned fragments while preserving intentional rhetorical repetition.
 3. **Multimodal Active Speaker Diarization (Gemini 3.8 Flash)**:
    - Evaluates on-camera visual cues (camera gaze, mouth articulatory sync, body language) and audio acoustics (close lavalier mic vs distant room echo).
-   - Accurately differentiates the on-screen target host from off-screen crew shouting section cues (e.g. "Action", "CTA-S2", "CDA84") and casual blooper chatter between takes, eliminating cumbersome local diarization models while maintaining flawless role separation.
+   - Accurately differentiates the on-screen target host from off-screen crew shouting section cues (e.g. "Action", "Scene 1", "Take 2") and casual blooper chatter between takes, eliminating cumbersome local diarization models while maintaining flawless role separation.
 4. **Word-Level Acoustic Ground Truth & Global Cross-Clip Coalescing**:
    - Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA) extracts phoneme-aligned word timestamps segmented purely on physical breath pauses and punctuation closure.
    - Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`) automatically merges consecutive `Sentence ID`s across adjacent clips when `gap < 0.40s`, eliminating artificial internal jump-cuts.
@@ -73,9 +73,9 @@ video-trimmer/
    - Scans the pre-speech dead air to snap cut-ins precisely **80ms before vocal cord vibration**, eliminating awkward pre-speech dead air and post-slate pauses.
 6. **Word Ground Truth Tail & Plosive Defense**:
    - Strictly enforces `true_speech_end >= t_last` with forward-only tracking down to ambient room noise.
-   - Accommodates voiceless consonant plosive closures (e.g. `/t/`, `/p/`, `/k/` in words like「台」) and soft trailing nasal vowels without clipping word endings.
-7. **15ms Audio Equal-Power Micro-Crossfade & Hardware-Accelerated Keyframe Rendering**:
-   - FFmpeg rendering uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`), Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 15ms `afade` equal-power micro-fades (`iqsin`/`qsin`) across all cut boundaries.
+   - Accommodates voiceless consonant plosive closures (e.g. `/t/`, `/p/`, `/k/` stops) and soft trailing nasal vowels without clipping word endings.
+7. **20ms Audio Equal-Power Micro-Crossfade & Hardware-Accelerated Keyframe Rendering**:
+   - FFmpeg rendering uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`), Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 20ms `afade` equal-power micro-fades (`iqsin`/`qsin`) across all cut boundaries.
 8. **Production Script Injection (`--script`)**:
    - Ingests production shooting scripts (`.md` / `.txt`) to guide section-by-section matching and prevent skipping intended talking points.
 9. **Pre-Render Surgical Micro-Window Repair & 8-Dimension Quality Audit (`edl_auditor.py`)**:
@@ -163,7 +163,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 ## Output Deliverables
 
 For an input file `raw_footage.mp4`, the skill isolates all generated files inside `<input_dir>/output/` (or the directory specified via `-o`):
-1. `output/raw_footage_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 15ms micro-fades.
+1. `output/raw_footage_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 20ms micro-fades.
 2. `output/raw_footage_<suffix>_edl.xml`: Final Cut Pro 7 XML timeline for **Premiere Pro** & **DaVinci Resolve**.
 3. `output/raw_footage_<suffix>_edl.fcpxml`: FCPXML timeline for **Final Cut Pro X**.
 4. `output/raw_footage_<suffix>_edl.json`: Structured decision metadata with `agent_verdict`, per-clip CPS, and margins.

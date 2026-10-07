@@ -1,31 +1,21 @@
-"""Centrally managed named constants. Replace scattered literal values."""
+"""Centrally managed named constants for the Video Trimmer pipeline."""
 
-# --- Speech/silence gating threshold: use an absolute dBFS floor. ---
-# Basis: EBU/ITU-R BS.1770 loudness gating concepts and common industry
-# tool ranges. Studio noise floor sits below -60dBFS. Speech peaks sit
-# near -20dBFS. Use the midpoint as the absolute gate (CLI can override).
+# Absolute dBFS silence floor based on EBU/ITU-R BS.1770 loudness gating (-40 dBFS).
 SILENCE_THRESHOLD_DBFS = -40.0
 
-# --- Audio crossfade duration. ---
-# Basis: AGENTS.md mandates a 15ms equal-power micro-crossfade
-# (afade curve=iqsin/qsin) to prevent acoustic pops and clicks.
-CROSSFADE_DURATION_SEC = 0.015
+# Equal-power audio micro-crossfade duration (20ms, lower bound of the 20-50ms click-free range).
+CROSSFADE_DURATION_SEC = 0.020
 
-# --- Empirical values below. No public industry standard found. Keep the
-# values unchanged; only give them names. ---
-HANGOVER_STEPS = 7  # 70ms silence settle window (10ms per step)
+# Number of 10ms steps (70ms total) required to confirm trailing speech decay into silence.
+HANGOVER_STEPS = 7
 
-# --- Allowed input video extensions (case-insensitive). ---
+# Supported input video file extensions (case-insensitive).
 ALLOWED_INPUT_EXTENSIONS = (".mp4", ".mov")
 
-# --- Gemini API network call retry parameters. ---
-# Retry up to 3 times (4 attempts total: 1 call + 3 retries).
-# Use exponential backoff: 1s -> 2s -> 4s between attempts.
-# Raise GeminiAPIError after the 3rd retry (4th attempt) fails.
+# Vertex AI network retry configuration (1 initial attempt + up to 3 exponential-backoff retries).
 GEMINI_RETRY_ATTEMPTS = 4
 GEMINI_RETRY_WAIT_MIN_SEC = 1
 GEMINI_RETRY_WAIT_MAX_SEC = 4
 
-# --- Gemini output token limit ---
-# Set max_output_tokens to 65536 while preserving native dynamic thinking.
+# Maximum output token limit for Gemini multimodal JSON responses.
 GEMINI_MAX_OUTPUT_TOKENS = 65536
