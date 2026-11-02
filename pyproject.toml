@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "video-trimmer"
 version = "0.1.0"
-description = "AI-Powered Smart Video Trimmer with Multimodal Understanding, Acoustic Onset Snapping & Text-Based Editing"
+description = "AI-Powered Smart Video Trimmer with Gemini 3.8 Flash Multimodal Video Understanding, Dual-Engine Chirp 3 / Whisper Word-Level Acoustic Ground Truth, and Composite Pick-Up Backfill"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -18,8 +18,11 @@ keywords = [
     "ai-video-editing",
     "rough-cut",
     "gemini",
+    "chirp-3",
+    "speech-to-text",
     "whisper",
     "mlx-whisper",
+    "composite-pickup",
     "ffmpeg",
     "text-based-editing"
 ]

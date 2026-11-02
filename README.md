@@ -11,7 +11,7 @@
 
 ## Overview
 
-**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 3.8 Flash** multimodal video reasoning with **Whisper Word-Level Acoustic Ground Truth** (`mlx-whisper`), a **5-Layer Unified Architecture**, and **Acoustic Onset Snapping**. Each run removes bad takes, stutters, and dead air without truncating continuous speech, then exports NLE project timelines (`.xml`, `.fcpxml`, `.csv`), an 8-dimension quality audit report (`.md`, `.json`), and a rendered MP4 video.
+**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 3.8 Flash** multimodal video reasoning with **Dual-Engine Word-Level Acoustic Ground Truth** (Google Cloud Speech-to-Text V2 **Chirp 3** at `0.001 s` precision by default; local **Whisper** via `mlx-whisper` / `faster-whisper` optional), **Last-Take-Anchored Composite Sub-Spans**, a **5-Layer Unified Architecture**, and **Acoustic Onset Snapping**. Each run removes bad takes, mid-sentence stumbles, and dead air while salvaging partial pick-up takes, then exports NLE project timelines (`.xml`, `.fcpxml`, `.csv`), an 8-dimension quality audit report (`.md`, `.json`), and a rendered MP4 video.
 
 ---
 
@@ -32,35 +32,35 @@ flowchart TD
         SC["Optional Shooting Script<br/>(shooting_script.md)"]:::inputStyle
     end
 
-    subgraph L1["Layer 1: Pure Acoustic & Punctuation Segmentation (transcribe.py)"]
-        W_ASR["Whisper Word-Level ASR<br/>(mlx-whisper / faster-whisper, word_timestamps=True)"]:::stage1Style
+    subgraph L1["Layer 1: Dual-Engine Acoustic & Punctuation Segmentation (chirp3_asr / transcribe)"]
+        W_ASR["Dual-Engine Word-Level ASR<br/>(Default: Cloud STT V2 Chirp 3 0.001s | Optional: Whisper)"]:::stage1Style
         S_SEG["Physical Boundary Sentence ID Split<br/>(Breath Pause >=0.20s, Stretched Onset, Punctuation & Conjunctions)"]:::stage1Style
-        W_JSON["Artifact: <basename>_whisper_raw.json<br/>(Acoustic Ground Truth & Sentence Index)"]:::artifactStyle
+        W_JSON["Artifact: <basename>_whisper_raw.json<br/>(Engine-Tagged Acoustic Ground Truth & Sentence Index)"]:::artifactStyle
         W_ASR --> S_SEG --> W_JSON
     end
 
-    subgraph L2["Layer 2: Dual-Mode LLM Arbitration & Micro-Window Repair (gemini_client / edl_auditor)"]
+    subgraph L2["Layer 2: Dual-Mode LLM Arbitration & Composite Span Occlusion (gemini_client / edl_auditor)"]
         MODE["Vertex AI Gemini 3.8 Flash Multimodal Video Scan<br/>• Mode A: Script-Anchored Alignment [Script Block 01..NN]<br/>• Mode B: Unscripted Intent-Window Arbitration"]:::stage2Style
-        REPAIR["Dual-Track Retake Detection & 15s-90s Surgical Video Rescan<br/>(TAIL_HEAD_RETAKE / INTRA_CLIP_REPEAT + Last-Take-Wins)"]:::stage2Style
+        REPAIR["Micro-Window Rescan & Right-to-Left Span Occlusion<br/>(Full Restart: Last-Take-Wins | Partial Pick-Up: Prefix Backfill >=0.55s)"]:::stage2Style
         MODE --> REPAIR
     end
 
-    subgraph L3_L4["Layer 3 & 4: Word-Boundary Trimming, Coalescing & Acoustic Snapping"]
-        L3["Layer 3: Sub-Unit Expansion & Word-Boundary Trimming<br/>(resolve_clip_sub_units + _trim_matched_words_by_transcript)"]:::stage3Style
-        L4["Layer 4: Global Cross-Clip Coalescing<br/>(coalesce_adjacent_sub_units, Merge Continuous IDs with Gap <0.40s)"]:::stage3Style
-        AC["Acoustic Onset Snapping & Plosive Tail Defense<br/>(80ms Pre-Vocal Onset + Dynamic CPS Margin >=t_last)"]:::stage3Style
+    subgraph L3_L4["Layer 3 & 4: Sub-Span Slicing, Coalescing & Acoustic Snapping"]
+        L3["Layer 3: Two-Span Stumble Excision & Hard-Wall Clamping<br/>(CJK Proportional Slicing + 0.001s External Word Hard-Wall)"]:::stage3Style
+        L4["Layer 4: Global Cross-Clip Coalescing<br/>(Merge Continuous IDs <0.40s, Preserve Composite Splices)"]:::stage3Style
+        AC["Acoustic Onset Snapping, Overlap Pivot Sync & Gain Match<br/>(Post-Pause Onset Clamp + 40ms Seam Tightening + RMS Gain Match)"]:::stage3Style
         L3 --> L4 --> AC
     end
 
     subgraph L5["Layer 5: Deterministic Timeline Sanitization & 8-Dimension Audit (edl_auditor.py)"]
-        SAN["Monotonic Timeline Sanitization<br/>(Prune Nested Clips, Resolve Overlaps, Coalesce <0.45s Micro-Clips)"]:::stage4Style
-        AUD["8-Dimension Dual-Track Quality Audit & agent_verdict Gate<br/>(Whisper + Gemini Retake Check, Script Coverage & Pacing)"]:::stage4Style
+        SAN["Monotonic Timeline Sanitization<br/>(Hard-Wall Capped Plosive Floor, Prune Overlaps, Merge <0.45s Clips)"]:::stage4Style
+        AUD["8-Dimension Dual-Track Quality Audit & agent_verdict Gate<br/>(ASR Engine + Composite Splice Telemetry & Flag-Preserving Remediation)"]:::stage4Style
         SAN --> AUD
     end
 
     subgraph Deliverables["Final Deliverables (<input_dir>/output/)"]
-        OUT_MP4["Deliverable: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox Hardware Render + 20ms Equal-Power Micro-Fade)"]:::outputStyle
-        OUT_NLE["Deliverable: Multi-NLE Project Timelines<br/>(.xml / .fcpxml / .csv)"]:::outputStyle
+        OUT_MP4["Deliverable: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox + 20ms Equal-Power Fade + Optional 1.12x Punch-In)"]:::outputStyle
+        OUT_NLE["Deliverable: Multi-NLE Project Timelines<br/>(.xml / .fcpxml / .csv with Composite Splice Markers)"]:::outputStyle
         OUT_REP["Deliverable: 8-Dimension Quality Audit Reports<br/>(_edl_report.md & _edl_report.json)"]:::outputStyle
     end
 
@@ -77,27 +77,42 @@ flowchart TD
     AUD --> OUT_REP
 ```
 
-1. **Layer 1 — Pure Acoustic & Punctuation Clause Segmentation (`transcribe.py`)**:
-   - Extracts phoneme-aligned word timestamps via Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA).
-   - Splits `Sentence ID` units purely on physical boundaries: breath pauses (`gap >= 0.20 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), punctuation closure, and speaker turns, while preserving conjunction attachment (`CONJUNCTIONS`) across micro-pauses (`gap < 0.25 s`).
-   - Enforces a strict **Zero Python String-Similarity Rule**: Python never guesses semantic retakes via character overlap; semantic arbitration belongs exclusively to the LLM.
-2. **Layer 2 — Dual-Mode LLM Take Arbitration & Surgical Micro-Window Repair (`gemini_client.py` / `edl_auditor.py`)**:
-   - **Mode A: Monotonic Script-Anchored Alignment (When a Shooting Script is Provided)**: Parses the reference script with a Single Source of Truth (SSOT) parser (`extract_script_blocks`) that strips YAML frontmatter, stage directions, and non-spoken metadata headers (`Title:`, `Subject:`, `Outline:`, `標題：`, `主題：`, `內文：`). Formats spoken lines into `[Script Block 01] .. [Script Block NN]` with 100% numbering parity between the Gemini prompt and the EDL auditor, and retains at most one final complete take per block (`Last-Take-Wins`).
-   - **Mode B: Unscripted Intent-Window Arbitration (When No Script is Provided)**: Groups consecutive clauses into semantic intent windows, prunes abandoned fragments and false starts, and preserves intentional rhetorical repetition (e.g., three-part emphasis).
-   - **Surgical Micro-Window Repair & Multimodal Retake Arbitration (`edl_auditor.py`)**: Evaluates Mode A coverage with `len(block_norm)` as the sole denominator (`_script_block_coverage_score`). Detects missing script blocks, unanchored clips, cross-clip tail-to-head retakes (`TAIL_HEAD_RETAKE`), intra-clip repeated takes (`INTRA_CLIP_REPEAT`), and multi-take collisions (`SCRIPT_TAKE_COLLISION`), re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata(start_offset=..., end_offset=...)`, and applies `Last-Take-Wins` deduplication.
-3. **Layer 3 — Sub-Unit Expansion & Transcript Word-Boundary Trimming (`resolve_clip_sub_units`)**:
-   - Expands multi-sentence spans into individual `Sentence ID` sub-units so dropped NG sentences inside a time window are excluded.
-   - Aligns `t_first` and `t_last` to the exact Whisper word boundaries of `clip_data["transcript"]` (`_trim_matched_words_by_transcript`, using rightmost subsequence anchoring and short-token alignment) when the LLM trims a boundary stumble.
+1. **Layer 1 — Dual-Engine Word-Level Acoustic & Punctuation Segmentation (`chirp3_asr.py` / `transcribe.py`)**:
+   - **Default Engine (`--asr-engine chirp3`)**: Uses Google Cloud Speech-to-Text V2 `chirp_3` (`STT_LOCATION=us`, `enableWordTimeOffsets=True`, `enableAutomaticPunctuation=True`) to extract `0.001 s` word timestamps with automatic 18-minute chunking (5-second overlap) and 1-to-1 Simplified-to-Traditional character normalization for `zh-TW`. Enforces strict Fail-Fast on cloud or authentication errors without silent fallback to Whisper.
+   - **Optional Local Engine (`--asr-engine whisper`)**: Supports offline transcription via `mlx-whisper` (Apple Silicon Metal) or `faster-whisper` (CPU/CUDA) when requested by the user.
+   - Splits `Sentence ID` units purely on physical boundaries: breath pauses (`gap >= 0.20 s`, plus multi-character CJK breath splits `>= 0.35 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), punctuation closure, and speaker turns, while preserving conjunction attachment (`CONJUNCTIONS`). Python never guesses semantic retakes via string similarity.
+2. **Layer 2 — Dual-Mode LLM Take Arbitration & Last-Take-Anchored Composite Sub-Spans (`gemini_client.py` / `edl_auditor.py`)**:
+   - **Mode A: Monotonic Script-Anchored Alignment (With Shooting Script)**: Strips YAML frontmatter, stage directions, and metadata headers via `extract_script_blocks` (`[Script Block 01] .. [Script Block NN]`). Enforces `Last-Take-Wins` when the speaker restarts a block from the beginning.
+   - **Mode B: Unscripted Intent-Window Arbitration (Without Script)**: Prunes abandoned fragments and false starts while preserving intentional rhetorical repetition.
+   - **Last-Take-Anchored Right-to-Left Span Occlusion (`resolve_composite_prefix_occlusions`)**: When the speaker performs a partial tail pick-up (`Take 1: A + B1 + C_ng`, `Take 2: B2 + C_ok`), anchors on `Take 2` (`composite_role="continuation"`) and backfills only the non-occluded prefix `A` (`composite_role="prefix"`) from `Take 1` if `A` meets the script-neutral viability threshold (`is_viable_sub_span`, duration `>= 0.55 s`).
+   - **Surgical Micro-Window Repair (`edl_auditor.py`)**: Detects missing blocks, partial block coverage (`PARTIAL_SCRIPT_BLOCK_BACKFILL`), tail-to-head retakes (`TAIL_HEAD_RETAKE`), intra-clip repeats (`INTRA_CLIP_REPEAT`), and multi-take collisions (`SCRIPT_TAKE_COLLISION`), then re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata`.
+3. **Layer 3 — Two-Span Stumble Excision, CJK Proportional Slicing, & Hard-Wall Clamping (`transcribe.py`)**:
+   - Supports **Intra-Sentence Mid-Span Excision** (`_extract_matched_word_spans_by_transcript`), splitting `[A + B_ng + B_ok + C]` into clean sub-units `[A]` and `[B_ok + C]` around mid-sentence stumbles.
+   - Interpolates multi-character CJK word tokens proportionally (`_slice_words_on_char_span`) and clamps internal cuts `0.001 s` away from adjacent unselected words (`next_word_hard_wall` / `prev_word_hard_wall`) to prevent ghost syllables.
 4. **Layer 4 — Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`)**:
-   - Merges consecutive `Sentence ID`s across adjacent EDL clips when the physical inter-word gap is `< 0.40 s`, no `Sentence ID` was skipped, and neither boundary was trimmed for a retake, eliminating artificial internal jump-cuts and redundant micro-fades inside continuous sentences.
-5. **Layer 5 — Deterministic Timeline Sanitization & 8-Dimension Dual-Track Quality Audit (`edl_auditor.py`)**:
-   - Enforces strict chronological monotonicity (`source_in < source_out` and `c[i].source_out <= c[i+1].source_in`), prunes nested/contained redundant clips, guarantees `source_out >= t_last` (plosive tail floor), merges `< 0.45 s` flash-frame micro-clips, and generates an 8-dimension dual-track (Whisper + Gemini) rough-cut audit report (`_edl_report.md` and `_edl_report.json`) with a top-level `agent_verdict` quality gate.
-6. **Acoustic Onset Snapping & Plosive Tail Defense (`acoustic.py`)**:
-   - Places cut-in points 80 ms before vocal cord vibration and dynamically calculates lead-in/lead-out margins from presenter Characters Per Second (CPS) while enforcing `true_speech_end >= t_last`.
-7. **20 ms Audio Equal-Power Micro-Crossfade & Keyframe Hardware Rendering (`render.py`)**:
-   - Uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`) to skip discarded footage without decoding it, combined with Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 20 ms equal-power micro-fades (`afade=t=in:d=0.020:curve=iqsin` and `afade=t=out:d=0.020:curve=qsin`) at every cut boundary.
-8. **Multi-NLE Timeline Interoperability (`exporters.py`)**:
-   - Exports frame-accurate **Final Cut Pro 7 XML** (`.xml` for Adobe Premiere Pro and DaVinci Resolve), **Apple Final Cut Pro FCPXML** (`.fcpxml`), and **CSV** cut lists across standard frame rates (`23.976` to `60` fps).
+   - Merges consecutive `Sentence ID`s across adjacent clips when the physical inter-word gap is `< 0.40 s`, while preserving intentional composite pick-up splices (`is_composite_splice`).
+5. **Layer 5 — Deterministic Timeline Sanitization & 8-Dimension Quality Audit (`edl_auditor.py`)**:
+   - Enforces chronological monotonicity (`source_in < source_out` and `c[i].source_out <= c[i+1].source_in`), caps plosive-tail restoration at `next_word_hard_wall`, merges `< 0.45 s` flash-frame micro-clips, and generates `_edl_report.md` and `_edl_report.json` with `asr_engine`, `composite_splices_count`, and `agent_verdict`.
+6. **Acoustic Onset Snapping, Overlap Pivot Sync, & Loudness Matching (`acoustic.py`)**:
+   - Clamps post-pause inflated word onsets (`clamp_post_pause_word_onset`), synchronizes overlapping composite phrase pivots at minimum RMS energy valleys (`find_optimal_overlap_pivot`), tightens composite cut seams (`40 ms` buffers), and matches continuation loudness (`compute_composite_gain_db`, clamped to `±6.0 dB`).
+7. **20 ms Equal-Power Micro-Crossfade & Optional 1.12x Composite Punch-In (`render.py`)**:
+   - Renders with fast keyframe seeking (`-ss`/`-to`), Apple Silicon `VideoToolbox` hardware acceleration (`libx264` fallback), 20 ms equal-power micro-fades (`iqsin`/`qsin`), per-clip loudness gain filters, and optional `--punch-in-composite` (`1.12x` even-pixel crop zoom on pick-up continuations to mask visual jump-cuts).
+8. **Multi-NLE Timeline Interoperability with Composite Markers (`exporters.py`)**:
+   - Exports frame-accurate **FCP7 XML** (`.xml`), **Apple FCPXML v1.9** (`.fcpxml`), and **CSV** cut lists, embedding `Composite Splice (Pick-up)` timeline `<marker>` annotations and optional `112%` transform metadata.
+
+---
+
+## Why Cloud STT V2 Chirp 3 Is the Default Acoustic Engine
+
+Video rough-cutting and composite pick-up splicing require physical millisecond word boundaries rather than approximate subtitle-level alignment. **Video Trimmer** defaults to Google Cloud Speech-to-Text V2 `chirp_3` (`--asr-engine chirp3`) and keeps local Whisper (`--asr-engine whisper`) as an optional offline engine for five engineering reasons:
+
+| Dimension | Cloud STT V2 `chirp_3` (Default) | Local Whisper (`mlx-whisper` / `faster-whisper`, Optional) | Impact on Rough-Cut & Composite Splicing |
+| :--- | :--- | :--- | :--- |
+| **Post-Pause Word Onset Precision** | Acoustic-frame-grounded `0.001 s` (`1 ms`) word offsets lock directly to vocal onset. | Cross-attention DTW alignment often absorbs `0.3 s–1.5 s+` of preceding silence or breath into a word's `start` time. | Prevents dead air before cuts and keeps `40 ms` composite pick-up seams tight. |
+| **Verbatim Stumble & Retake Preservation** | Preserves false starts, partial words, and back-to-back retakes with monotonic word timestamps. | Autoregressive decoding can skip short stumbles, hallucinate in silence, or collapse timestamps (`start == end`) on repeated phrases. | Ensures Layer 3 (`next_word_hard_wall`) can isolate and excise mid-sentence NG words without ghost syllables. |
+| **Multilingual & Code-Switching Fidelity** | Recognizes mixed CJK and English technical terms (`API`, `SDK`, `GPU`) accurately in a single pass. | Compact local models (`small`) often transliterate or drop embedded English terms inside CJK speech. | Improves Mode A script-block coverage scoring and composite overlap pivot matching. |
+| **Automatic Punctuation Stability** | Native `enableAutomaticPunctuation=True` delivers consistent clause punctuation across 18-minute slices. | Punctuation output fluctuates with prompt conditioning and acoustic noise. | Stabilizes Layer 1 `Sentence ID` splitting without over-merging or fragmenting clauses. |
+| **Local Resource Footprint** | Stages lightweight 16 kHz mono MP3 slices to GCS with zero local model weights or VRAM contention. | Downloads multi-hundred-MB/GB weights and shares GPU/unified memory with FFmpeg `VideoToolbox`. | Keeps local hardware dedicated to fast keyframe seeking and MP4 rendering; Whisper remains available for offline use. |
 
 ---
 
@@ -114,25 +129,26 @@ video-trimmer/
 │       ├── scripts/                         # Canonical core engine modules (SSOT)
 │       │   ├── __init__.py
 │       │   ├── video_trimmer.py             # CLI parser and 5-layer pipeline orchestrator
-│       │   ├── constants.py                 # Named constants
+│       │   ├── constants.py                 # Named constants & ASR / composite thresholds
 │       │   ├── exceptions.py                # Exception hierarchy
-│       │   ├── acoustic.py                  # CPS calculation, onset snapping, and tail margins
-│       │   ├── transcribe.py                # Acoustic clause segmentation, word trimming, and coalescing
-│       │   ├── edl_auditor.py               # Surgical micro-window repair, timing sanitizer, and 8-D audit
+│       │   ├── chirp3_asr.py                # Google Cloud STT V2 Chirp 3 word-level ASR (0.001s precision)
+│       │   ├── acoustic.py                  # Onset snapping, overlap pivot sync, and RMS gain matching
+│       │   ├── transcribe.py                # Dual-engine segmentation, CJK slicing, and two-span excision
+│       │   ├── edl_auditor.py               # Span occlusion, micro-window repair, sanitizer, and 8-D audit
 │       │   ├── gemini_client.py             # Vertex AI (ADC) client and dual-mode prompt builder
 │       │   ├── gcs_utils.py                 # Cloud Storage staging, Google Drive cache, and CJK recovery
-│       │   ├── exporters.py                 # FCP7 XML, FCPXML, and CSV timeline exporters
-│       │   └── render.py                    # ffprobe inspection and FFmpeg micro-crossfade rendering
+│       │   ├── exporters.py                 # FCP7 XML, FCPXML v1.9, and CSV exporters with splice markers
+│       │   └── render.py                    # FFmpeg micro-crossfade, gain match, and 1.12x punch-in render
 │       └── prompts/                         # Canonical prompt specifications (SSOT)
-│           └── video_cut_prompt.md          # Dual-mode take arbitration & 5-rule subtraction prompt
+│           └── video_cut_prompt.md          # Dual-mode take arbitration & composite pick-up prompt
 ├── AGENTS.md                                # Workspace & engineering development rules (Part I & Part II)
 ├── README.md                                # English documentation
 ├── LICENSE                                  # MIT License
-├── .env.example                             # Environment variables template for Vertex AI and GCS
+├── .env.example                             # Environment variables template for Vertex AI, STT V2, and GCS
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python dependencies
-└── tests/                                   # Offline unit test suite (103 tests)
+└── tests/                                   # Offline unit test suite (126 tests)
 ```
 
 ---
@@ -163,20 +179,22 @@ git clone https://github.com/sylphlin/video-trimmer.git .agents/plugins/video-tr
 # Legacy Single-Skill Installation (~/.gemini/config/skills/)
 ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
 
-# Install Python Dependencies and Apple Silicon Metal Acceleration
+# Install Core Python Dependencies (Cloud Chirp 3 + Vertex AI Default)
 pip install -r ~/.gemini/config/plugins/video-trimmer/requirements.txt
+
+# Optional: Install Local Whisper Backend (Apple Silicon Metal, for --asr-engine whisper)
 pip install mlx-whisper
 ```
 
 ### 3. Provision Google Cloud Resources (`./setup.sh`)
 
-Run `setup.sh` to configure Vertex AI, Cloud Storage, and Application Default Credentials (ADC) using native `gcloud` commands:
+Run `setup.sh` to enable Vertex AI, Cloud Speech-to-Text V2 (`chirp_3`), and Cloud Storage, and configure Application Default Credentials (ADC) using native `gcloud` commands:
 
 ```bash
 # Authenticate ADC
 gcloud auth application-default login
 
-# Provision GCS bucket, CORS, two-tier lifecycle rules (raw: 2d, deliverables: 15d), IAM, and .env
+# Provision APIs, STT V2 & GCS IAM roles, two-tier lifecycle rules (raw: 2d, deliverables: 15d), and .env
 cd ~/.gemini/config/plugins/video-trimmer
 chmod +x setup.sh
 ./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
@@ -191,10 +209,10 @@ You can operate **Video Trimmer** in Antigravity using two interaction modes:
 1. **Concise `/skill` + `@file` Invocation (Recommended)**: Type `/video-trimmer` to select the plugin and tag your files with `@`. Specify only the key parameters (for example, `Video: @XX, Script: @YY`) without writing full sentences.
 2. **Natural Language Prompt (Auto-Routed)**: Describe your editing goal in plain conversational language. Antigravity automatically selects and runs this plugin.
 
-By default, all generated deliverables are isolated in the `output/` subdirectory next to the input video (`./output/` for Google Drive links).
+By default, **Video Trimmer** uses Cloud Speech-to-Text V2 `chirp_3` (`--asr-engine chirp3`) and isolates all generated deliverables in the `output/` subdirectory next to the input video (`./output/` for Google Drive links). Pass `ASR: whisper` only when you explicitly want local Whisper transcription, or add `Punch-in: true` (`--punch-in-composite`) to apply a `1.12x` framing zoom on composite pick-up cuts.
 
 ### Scenario 1: Script-Guided Recording Rough-Cut (Mode A: Monotonic Script-Anchored Alignment)
-Use this scenario when you have a shooting script or outline. The agent strips non-spoken metadata headers, aligns every spoken block in order, and keeps the final complete take for each block.
+Use this scenario when you have a shooting script or outline. The agent strips non-spoken metadata headers, aligns every spoken block in order, enforces `Last-Take-Wins` on full restarts, and automatically backfills missing prefixes on partial pick-up takes.
 
 - **Concise `/ + @` Command**:
   ```text
@@ -206,7 +224,7 @@ Use this scenario when you have a shooting script or outline. The agent strips n
   ```
 
 ### Scenario 2: Unscripted Talking-Head, Interview, or Vlog Rough-Cut (Mode B: Unscripted Intent-Window Arbitration)
-Use this scenario for free-form recordings without a script. The agent removes false starts, stutters, and dead air while preserving intentional rhetorical repetition.
+Use this scenario for free-form recordings without a script. The agent removes false starts, mid-sentence stumbles, and dead air while preserving intentional rhetorical repetition.
 
 - **Concise `/ + @` Command**:
   ```text
@@ -247,12 +265,12 @@ Pass a Google Drive URL directly without manually downloading large video files 
 
 For an input video `raw_footage.mp4`, the agent automatically creates an `output/` subdirectory next to the source video and delivers:
 
-1. **`output/raw_footage_<tag>_trimmed.mp4`**: Rendered rough-cut video with 20 ms equal-power audio crossfades.
-2. **`output/raw_footage_<tag>_edl.xml`**: Final Cut Pro 7 XML timeline for **Adobe Premiere Pro** and **DaVinci Resolve**.
-3. **`output/raw_footage_<tag>_edl.fcpxml`**: Apple FCPXML timeline for **Final Cut Pro**.
+1. **`output/raw_footage_<tag>_trimmed.mp4`**: Rendered rough-cut video with 20 ms equal-power audio crossfades and composite loudness matching.
+2. **`output/raw_footage_<tag>_edl.xml`**: Final Cut Pro 7 XML timeline for **Adobe Premiere Pro** and **DaVinci Resolve** (with `Composite Splice` markers).
+3. **`output/raw_footage_<tag>_edl.fcpxml`**: Apple FCPXML v1.9 timeline for **Final Cut Pro** (with `Composite Splice` markers).
 4. **`output/raw_footage_<tag>_edl.json`** & **`_edl.csv`**: Structured decision metadata and spreadsheet cut table with editorial notes.
-5. **`output/raw_footage_<tag>_edl_report.md`** & **`_edl_report.json`**: 8-dimension rough-cut quality audit report with top-level `agent_verdict`.
-6. **`output/raw_footage_whisper_raw.json`**: Cached Whisper word-level transcript.
+5. **`output/raw_footage_<tag>_edl_report.md`** & **`_edl_report.json`**: 8-dimension rough-cut quality audit report with `asr_engine`, `composite_splices_count`, and top-level `agent_verdict`.
+6. **`output/raw_footage_whisper_raw.json`**: Engine-tagged (`chirp3` or `whisper`) cached word-level acoustic transcript.
 
 ---
 
@@ -260,14 +278,14 @@ For an input video `raw_footage.mp4`, the agent automatically creates an `output
 
 | GCS Prefix (`matchesPrefix`) | Stored Objects | Retention (`age`) | Purpose |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | Staged raw videos (`raw/<filename>.mp4`) | **2 Days (`age: 2`)** | Keeps temporary staged media for 2 days as a safety backstop (normal runs delete staged objects immediately in `finally` blocks). |
+| **`raw/`** | Staged raw videos (`raw/<filename>.mp4`) and temporary Chirp 3 audio slices (`raw/chirp3_asr_*/`) | **2 Days (`age: 2`)** | Deletes staged media and ASR chunks immediately in `finally` blocks, with a 2-day bucket rule as a safety backstop. |
 | **`output/`**, **`deliverables/`**, **`trimmed/`** | Trimmed videos, XML/FCPXML timelines, and EDL reports | **15 Days (`age: 15`)** | Retains deliverables for 15 days for team review before automatic deletion. |
 
 ---
 
 ## Unit Testing
 
-Run the offline test suite (103 tests) before committing changes:
+Run the offline test suite (126 tests) before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v

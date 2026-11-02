@@ -3,10 +3,10 @@
 video-trimmer (AI-Powered Smart Video Trimmer)
 ---------------------------------------------
 An end-to-end video rough-cut and trimming engine powered by:
-- Whisper word-level acoustic ground truth (Apple Silicon mlx-whisper & faster-whisper)
-- Vertex AI Gemini 3.8 Flash multimodal video understanding and dual-mode take selection
-- Acoustic onset snapping (80ms pre-vocal onset) and plosive tail defense
-- Adaptive noise floor tracking and 20ms equal-power audio micro-crossfades
+- Dual-engine word-level acoustic ground truth (Cloud STT V2 Chirp 3 default; Whisper optional)
+- Vertex AI Gemini 3.8 Flash multimodal video understanding, dual-mode take selection, and composite pick-up backfill
+- Acoustic onset snapping, post-pause onset clamping, and plosive tail defense
+- Adaptive noise floor tracking, composite loudness gain matching, and 20ms equal-power audio micro-crossfades
 - Export to Premiere Pro (.xml), DaVinci Resolve (.xml), Final Cut Pro (.fcpxml), CSV (.csv), and MP4.
 """
 
@@ -36,8 +36,20 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_skill_root))
     __package__ = "scripts"
 
-from .acoustic import refine_speech_bounds_locked
-from .constants import ALLOWED_INPUT_EXTENSIONS
+from .acoustic import (
+    clamp_post_pause_word_onset,
+    compute_composite_gain_db,
+    find_optimal_overlap_pivot,
+    refine_speech_bounds_locked,
+)
+from .chirp3_asr import join_words_for_display
+from .constants import (
+    ALLOWED_INPUT_EXTENSIONS,
+    DEFAULT_ASR_ENGINE,
+    DEFAULT_CHIRP3_MODEL,
+    DEFAULT_STT_LOCATION,
+    DEFAULT_WHISPER_MODEL,
+)
 from .edl_auditor import (
     audit_edl_quality,
     deduplicate_and_sort_clips,
@@ -62,8 +74,10 @@ from .transcribe import (
     calculate_active_script_window,
     coalesce_adjacent_sub_units,
     detect_chunk_boundaries,
+    is_viable_sub_span,
+    normalize_text,
     resolve_clip_sub_units,
-    transcribe_video_whisper,
+    transcribe_video_words,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,7 +141,112 @@ def _resolve_output_dir(output_dir_arg: str | None, default_parent: Path) -> Pat
     return out_dir
 
 
+def _count_shared_word_overlap(prefix_words: list[dict], cont_words: list[dict], max_words: int = 8) -> int:
+    """Count exact normalized token overlap between the suffix of prefix_words and prefix of cont_words."""
+    max_k = min(max_words, len(prefix_words) - 1, len(cont_words) - 1)
+    if max_k <= 0:
+        return 0
+    pref_norms = [normalize_text(w.get("word", "")) for w in prefix_words]
+    cont_norms = [normalize_text(w.get("word", "")) for w in cont_words]
+    for k in range(max_k, 0, -1):
+        if all(pref_norms[-k:]) and pref_norms[-k:] == cont_norms[:k]:
+            if len("".join(pref_norms[-k:])) >= 2:
+                return k
+    return 0
+
+
+def _trim_transcript_tail_to_words(raw_transcript: str, kept_words: list[dict]) -> str:
+    """Trim the tail of raw_transcript so its normalized length matches kept_words."""
+    target_norm = "".join(normalize_text(w.get("word", "")) for w in kept_words)
+    if not target_norm:
+        return ""
+    if not raw_transcript:
+        return join_words_for_display([w.get("word", "") for w in kept_words if w.get("word")])
+    seen = 0
+    cut_pos = len(raw_transcript)
+    for idx, ch in enumerate(raw_transcript):
+        if normalize_text(ch):
+            seen += 1
+            if seen >= len(target_norm):
+                cut_pos = idx + 1
+                break
+    trimmed = raw_transcript[:cut_pos].rstrip(" ，,、；;：:")
+    return trimmed or join_words_for_display([w.get("word", "") for w in kept_words if w.get("word")])
+
+
+def _trim_transcript_head_to_words(raw_transcript: str, kept_words: list[dict]) -> str:
+    """Trim the head of raw_transcript so its trailing normalized characters match kept_words."""
+    target_norm = "".join(normalize_text(w.get("word", "")) for w in kept_words)
+    if not target_norm:
+        return ""
+    raw_norm = normalize_text(raw_transcript)
+    if not raw_transcript or len(raw_norm) <= len(target_norm):
+        return raw_transcript or join_words_for_display([w.get("word", "") for w in kept_words if w.get("word")])
+    skip_norm = len(raw_norm) - len(target_norm)
+    seen = 0
+    start_pos = 0
+    for idx, ch in enumerate(raw_transcript):
+        if normalize_text(ch):
+            if seen == skip_norm:
+                start_pos = idx
+                break
+            seen += 1
+    trimmed = raw_transcript[start_pos:].lstrip(" ，,、。！？!?；;：:")
+    return trimmed or join_words_for_display([w.get("word", "") for w in kept_words if w.get("word")])
+
+
+def _synchronize_composite_overlap_pivots(filtered_units: list[dict], audio, sr: int) -> None:
+    """Synchronize word-level overlap pivots across adjacent composite prefix -> continuation pairs."""
+    for idx in range(len(filtered_units) - 1):
+        prev_su = filtered_units[idx]
+        curr_su = filtered_units[idx + 1]
+        if not (prev_su.get("composite_role") == "prefix" and curr_su.get("is_composite_splice")):
+            continue
+        pref_words = list(prev_su.get("words") or [])
+        cont_words = list(curr_su.get("words") or [])
+        overlap_k = _count_shared_word_overlap(pref_words, cont_words)
+        if overlap_k <= 0:
+            continue
+
+        pivot_p = find_optimal_overlap_pivot(audio, sr, pref_words, cont_words, overlap_k)
+        pref_keep = len(pref_words) - overlap_k + pivot_p
+        cont_start = pivot_p
+        if pref_keep <= 0 or cont_start >= len(cont_words):
+            continue
+
+        new_pref_words = pref_words[:pref_keep]
+        new_cont_words = cont_words[cont_start:]
+        new_pref_text = join_words_for_display([w.get("word", "") for w in new_pref_words if w.get("word")])
+        new_pref_dur = float(new_pref_words[-1]["end"]) - float(new_pref_words[0]["start"])
+        if not is_viable_sub_span(new_pref_text, new_pref_dur):
+            continue
+
+        if pref_keep < len(pref_words):
+            cut_word_start = round(float(pref_words[pref_keep]["start"]), 3)
+            prev_su["words"] = new_pref_words
+            prev_su["t_last"] = round(float(new_pref_words[-1]["end"]), 3)
+            prev_next = prev_su.get("next_sentence_start")
+            prev_su["next_sentence_start"] = min(float(prev_next), cut_word_start) if prev_next is not None else cut_word_start
+            prev_su["next_word_hard_wall"] = prev_su["next_sentence_start"]
+            prev_su["trimmed_tail"] = True
+            prev_su["whisper_transcript"] = new_pref_text
+            prev_su["transcript"] = _trim_transcript_tail_to_words(prev_su.get("transcript", ""), new_pref_words)
+
+        if cont_start > 0:
+            cut_prev_end = round(float(cont_words[cont_start - 1]["end"]), 3)
+            new_cont_text = join_words_for_display([w.get("word", "") for w in new_cont_words if w.get("word")])
+            curr_su["words"] = new_cont_words
+            curr_su["t_first"] = round(float(new_cont_words[0]["start"]), 3)
+            curr_prev = curr_su.get("prev_sentence_end")
+            curr_su["prev_sentence_end"] = max(float(curr_prev), cut_prev_end) if curr_prev is not None else cut_prev_end
+            curr_su["trimmed_head"] = True
+            curr_su["whisper_transcript"] = new_cont_text
+            curr_su["transcript"] = _trim_transcript_head_to_words(curr_su.get("transcript", ""), new_cont_words)
+
+
 def _run(args):
+    load_env_file()
+
     if is_gdrive_source(args.input):
         out_dir = _resolve_output_dir(args.output_dir, Path.cwd())
         try:
@@ -146,8 +265,23 @@ def _run(args):
 
     _validate_input_extension(video_path)
     base_name = video_path.stem
-
     tag = args.suffix if args.suffix else ("agentic" if args.agentic else "static")
+
+    script_path = Path(args.script).expanduser().resolve() if args.script else None
+    if script_path is not None and not script_path.exists():
+        raise InvalidInputError(f"Reference script file not found: {script_path}")
+    script_text = script_path.read_text(encoding="utf-8") if script_path is not None else None
+
+    resolved_bucket = (
+        args.bucket
+        or os.environ.get("VIDEO_TRIMMER_BUCKET")
+        or os.environ.get("VIDEO_STORAGE_BUCKET")
+        or os.environ.get("MEETING_STORAGE_BUCKET")
+        or os.environ.get("GCS_BUCKET")
+        or ""
+    ).removeprefix("gs://") or None
+    resolved_stt_location = args.stt_location or os.environ.get("STT_LOCATION") or DEFAULT_STT_LOCATION
+    resolved_transcribe_model = os.environ.get("TRANSCRIBE_MODEL") or DEFAULT_CHIRP3_MODEL
 
     logger.info("==> 1. Probing input video: %s", video_path.name)
     logger.info("    Output directory: %s", out_dir)
@@ -155,17 +289,30 @@ def _run(args):
     logger.info("    Duration: %.1f s (~%.1f min) | Resolution: %dx%d | Frame rate: %.3f fps",
                 total_dur, total_dur / 60, width, height, fps)
 
-    # Layer 1: Whisper word-level acoustic transcription and clause segmentation
+    # Layer 1: Dual-engine word-level acoustic transcription (Chirp 3 default; Whisper optional)
     whisper_segs = []
     whisper_sentences = []
 
     if not args.skip_whisper:
         whisper_json = out_dir / f"{base_name}_whisper_raw.json"
-        logger.info("==> 2. Running Whisper word-level transcription and clause segmentation...")
-        whisper_segs, whisper_sentences = transcribe_video_whisper(
-            video_path,
-            whisper_json,
-            model_name="small",
+        asr_label = (
+            f"Chirp 3 (Cloud STT V2, {resolved_stt_location})"
+            if args.asr_engine == "chirp3"
+            else f"Whisper ({args.whisper_model})"
+        )
+        logger.info("==> 2. Running %s word-level transcription and clause segmentation...", asr_label)
+        whisper_segs, whisper_sentences = transcribe_video_words(
+            video_path=video_path,
+            out_json_path=whisper_json,
+            asr_engine=args.asr_engine,
+            whisper_model=args.whisper_model,
+            language=args.language,
+            text_hint=script_text,
+            project=args.project,
+            gcs_bucket=resolved_bucket,
+            stt_location=resolved_stt_location,
+            transcribe_model=resolved_transcribe_model,
+            force=args.force,
         )
 
     whisper_units = whisper_sentences if whisper_sentences else whisper_segs
@@ -173,8 +320,6 @@ def _run(args):
     # Layer 2: Gemini multimodal video understanding and dual-mode take arbitration
     inference_metrics = {}
     micro_window_repairs = []
-    script_path = Path(args.script).resolve() if args.script else None
-    script_text = script_path.read_text(encoding="utf-8") if (script_path is not None and script_path.exists()) else None
 
     if args.cached_json:
         cached_file = Path(args.cached_json).resolve()
@@ -184,7 +329,6 @@ def _run(args):
         with open(cached_file, "r", encoding="utf-8") as f:
             model_edl = json.load(f)
     else:
-        load_env_file()
         client = get_gemini_client(project_id=args.project, location=args.region)
 
         _resolved_file = Path(__file__).resolve()
@@ -224,20 +368,11 @@ def _run(args):
             window_start=win_start,
         )
 
-        resolved_bucket = (
-            args.bucket
-            or os.environ.get("VIDEO_TRIMMER_BUCKET")
-            or os.environ.get("VIDEO_STORAGE_BUCKET")
-            or os.environ.get("MEETING_STORAGE_BUCKET")
-            or os.environ.get("GCS_BUCKET")
-            or ""
-        ).removeprefix("gs://") or None
-
         logger.info("==> 3. Staging video to Cloud Storage...")
         gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(video_path, resolved_bucket)
 
         mode_str = "Agentic Video Understanding" if args.agentic else "Static Multimodal"
-        logger.info("==> 4. Running %s [Mode: %s] with Whisper sentences for take arbitration...", args.model, mode_str)
+        logger.info("==> 4. Running %s [Mode: %s] with ground-truth sentences for take arbitration...", args.model, mode_str)
 
         usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
         duration = 0.0
@@ -338,6 +473,7 @@ def _run(args):
         mode = "agentic" if args.agentic else "static"
         inference_metrics = {
             "mode": mode,
+            "asr_engine": args.asr_engine,
             "duration_seconds": round(duration, 2),
             "prompt_tokens": usage["prompt_tokens"],
             "candidates_tokens": usage["candidates_tokens"],
@@ -355,77 +491,140 @@ def _run(args):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     audio, sr = sf.read(str(temp_wav))
 
-    if whisper_units and isinstance(model_edl, dict) and model_edl.get("final_edl"):
-        model_edl["final_edl"] = deduplicate_and_sort_clips(
-            clips=model_edl["final_edl"],
-            whisper_units=whisper_units,
-            script_text=script_text,
-        )
+    try:
+        if whisper_units and isinstance(model_edl, dict) and model_edl.get("final_edl"):
+            model_edl["final_edl"] = deduplicate_and_sort_clips(
+                clips=model_edl["final_edl"],
+                whisper_units=whisper_units,
+                script_text=script_text,
+            )
 
-    expanded_units = []
-    for c in model_edl.get("final_edl", []):
-        sub_units = resolve_clip_sub_units(whisper_units, c, total_dur)
-        for idx, su in enumerate(sub_units):
-            topic_label = c["topic"] if len(sub_units) == 1 else f"{c['topic']} (#{idx + 1})"
-            expanded_units.append({
-                "parent_clip": c,
-                "topic": topic_label,
+        expanded_units = []
+        for c in model_edl.get("final_edl", []):
+            sub_units = resolve_clip_sub_units(whisper_units, c, total_dur)
+            for idx, su in enumerate(sub_units):
+                topic_label = c["topic"] if len(sub_units) == 1 else f"{c['topic']} (#{idx + 1})"
+                expanded_units.append({
+                    "parent_clip": c,
+                    "topic": topic_label,
+                    "sentence_ids": su.get("sentence_ids", []),
+                    "t_first": su["t_first"],
+                    "t_last": su["t_last"],
+                    "prev_sentence_end": su["prev_sentence_end"],
+                    "next_sentence_start": su["next_sentence_start"],
+                    "next_word_hard_wall": su.get("next_word_hard_wall"),
+                    "words": list(su.get("words") or []),
+                    "transcript": su["transcript"],
+                    "whisper_transcript": su.get("whisper_transcript", su["transcript"]),
+                    "trimmed_head": su.get("trimmed_head", False),
+                    "trimmed_tail": su.get("trimmed_tail", False),
+                    "composite_role": su.get("composite_role", "none"),
+                    "is_composite_splice": bool(su.get("is_composite_splice", False)),
+                    "llm_verified_window": bool(su.get("llm_verified_window", False)),
+                })
+
+        # Coalesce adjacent continuous sub-units across clip boundaries when gap < 0.40s and no ID is skipped
+        filtered_units = coalesce_adjacent_sub_units(expanded_units)
+
+        # Synchronize shared overlap pivots across composite prefix -> continuation pairs
+        _synchronize_composite_overlap_pivots(filtered_units, audio, sr)
+
+        refined_edl = []
+        for seq_id, su in enumerate(filtered_units, start=1):
+            c = su["parent_clip"]
+            su_words = list(su.get("words") or [])
+            prev_sentence_end = su["prev_sentence_end"]
+            next_sentence_start = su["next_sentence_start"]
+
+            if su_words:
+                w0 = su_words[0]
+                gap_before = (
+                    float(w0["start"]) - float(prev_sentence_end)
+                    if prev_sentence_end is not None
+                    else 1.0
+                )
+                clamped_w0 = clamp_post_pause_word_onset(
+                    audio,
+                    sr,
+                    float(w0["start"]),
+                    float(w0["end"]),
+                    prev_word_end=prev_sentence_end,
+                    gap_before=gap_before,
+                    is_trimmed_head=bool(su.get("trimmed_head") or su.get("is_composite_splice")),
+                )
+                if clamped_w0 > float(w0["start"]):
+                    su_words[0] = {**w0, "start": clamped_w0}
+                    su["t_first"] = clamped_w0
+
+            t_first = float(su["t_first"])
+            t_last = float(su["t_last"])
+            transcript = su["transcript"]
+            tight_out_seam = bool(su.get("composite_role") == "prefix" or su.get("trimmed_tail"))
+            tight_in_seam = bool(su.get("is_composite_splice") or su.get("trimmed_head"))
+
+            tight_in, tight_out, clip_cps, in_m, out_m = refine_speech_bounds_locked(
+                audio,
+                sr,
+                t_first,
+                t_last,
+                total_dur,
+                transcript=transcript,
+                pacing=args.pacing,
+                prev_sentence_end=prev_sentence_end,
+                next_sentence_start=next_sentence_start,
+                tight_out_seam=tight_out_seam,
+                tight_in_seam=tight_in_seam,
+            )
+            hard_wall = su.get("next_word_hard_wall")
+            if hard_wall is not None and tight_out > float(hard_wall):
+                tight_out = round(max(t_last, float(hard_wall)), 3)
+            if tight_out <= tight_in:
+                tight_out = round(tight_in + 0.50, 3)
+            dur = round(tight_out - tight_in, 3)
+
+            refined_edl.append({
+                "clip_id": seq_id,
+                "topic": su["topic"],
                 "sentence_ids": su.get("sentence_ids", []),
-                "t_first": su["t_first"],
-                "t_last": su["t_last"],
-                "prev_sentence_end": su["prev_sentence_end"],
-                "next_sentence_start": su["next_sentence_start"],
-                "transcript": su["transcript"],
-                "whisper_transcript": su.get("whisper_transcript", su["transcript"]),
-                "trimmed_head": su.get("trimmed_head", False),
-                "trimmed_tail": su.get("trimmed_tail", False),
+                "t_first": round(t_first, 3),
+                "t_last": round(t_last, 3),
+                "source_in": tight_in,
+                "source_out": tight_out,
+                "duration": dur,
+                "cps": clip_cps,
+                "in_margin": in_m,
+                "out_margin": out_m,
+                "transcript": transcript,
+                "whisper_transcript": su.get("whisper_transcript", transcript),
+                "composite_role": su.get("composite_role", "none"),
+                "is_composite_splice": bool(su.get("is_composite_splice", False)),
+                "llm_verified_window": bool(su.get("llm_verified_window", False)),
+                "trimmed_head": bool(su.get("trimmed_head", False)),
+                "trimmed_tail": bool(su.get("trimmed_tail", False)),
+                "next_word_hard_wall": hard_wall,
+                "gain_db": 0.0,
+                "take_selection_reason": c.get("take_selection_reason", ""),
+                "visual_check": c.get("visual_check", "Direct eye contact with camera, eyes open."),
+                "audio_check": c.get("audio_check", f"{args.asr_engine} locked (in_margin={in_m:.3f}s, out_margin={out_m:.3f}s)")
             })
+            logger.info("    Clip %2d: In=%6.3fs, Out=%6.3fs (%5.3fs) | t_first: %.3fs, t_last: %.3fs | %s",
+                        seq_id, tight_in, tight_out, dur, t_first, t_last, su["topic"])
 
-    # Coalesce adjacent continuous sub-units across clip boundaries when gap < 0.40s and no ID is skipped
-    filtered_units = coalesce_adjacent_sub_units(expanded_units)
+        # Layer 5: Deterministic timeline sanitization and composite loudness gain matching
+        refined_edl, sanitization_stats = sanitize_refined_edl(refined_edl, total_dur)
+        for idx in range(1, len(refined_edl)):
+            curr_c = refined_edl[idx]
+            if curr_c.get("is_composite_splice"):
+                prev_c = refined_edl[idx - 1]
+                curr_c["gain_db"] = compute_composite_gain_db(
+                    audio,
+                    sr,
+                    (prev_c["source_in"], prev_c["source_out"]),
+                    (curr_c["source_in"], curr_c["source_out"]),
+                )
+    finally:
+        temp_wav.unlink(missing_ok=True)
 
-    refined_edl = []
-    for seq_id, su in enumerate(filtered_units, start=1):
-        c = su["parent_clip"]
-        t_first = su["t_first"]
-        t_last = su["t_last"]
-        transcript = su["transcript"]
-        prev_sentence_end = su["prev_sentence_end"]
-        next_sentence_start = su["next_sentence_start"]
-
-        tight_in, tight_out, clip_cps, in_m, out_m = refine_speech_bounds_locked(
-            audio, sr, t_first, t_last, total_dur, transcript=transcript, pacing=args.pacing,
-            prev_sentence_end=prev_sentence_end, next_sentence_start=next_sentence_start
-        )
-        if tight_out <= tight_in:
-            tight_out = tight_in + 1.0
-        dur = round(tight_out - tight_in, 2)
-
-        refined_edl.append({
-            "clip_id": seq_id,
-            "topic": su["topic"],
-            "sentence_ids": su.get("sentence_ids", []),
-            "t_first": round(t_first, 2),
-            "t_last": round(t_last, 2),
-            "source_in": tight_in,
-            "source_out": tight_out,
-            "duration": dur,
-            "cps": clip_cps,
-            "in_margin": in_m,
-            "out_margin": out_m,
-            "transcript": transcript,
-            "whisper_transcript": su.get("whisper_transcript", transcript),
-            "take_selection_reason": c.get("take_selection_reason", ""),
-            "visual_check": c.get("visual_check", "Direct eye contact with camera, eyes open."),
-            "audio_check": c.get("audio_check", f"Whisper locked (in_margin={in_m:.2f}s, out_margin={out_m:.2f}s)")
-        })
-        logger.info("    Clip %2d: In=%6.2fs, Out=%6.2fs (%5.2fs) | t_first: %.2fs, t_last: %.2fs | %s",
-                    seq_id, tight_in, tight_out, dur, t_first, t_last, su["topic"])
-
-    temp_wav.unlink(missing_ok=True)
-
-    # Layer 5: Deterministic timeline sanitization and 8-dimension rough-cut quality audit
-    refined_edl, sanitization_stats = sanitize_refined_edl(refined_edl, total_dur)
     total_out_dur = round(sum(c["duration"] for c in refined_edl), 2)
     avg_cps = round(sum(c["cps"] for c in refined_edl) / max(1, len(refined_edl)), 2)
     logger.info("    Retained clips: %d | Trimmed duration: %.1f s (~%.2f min) | Average CPS: %.2f chars/s",
@@ -440,6 +639,10 @@ def _run(args):
         script_path=script_path,
         sanitization_stats=sanitization_stats,
         micro_window_repairs=micro_window_repairs,
+        asr_engine=args.asr_engine,
+        language=args.language,
+        whisper_model=args.whisper_model,
+        punch_in_composite=args.punch_in_composite,
     )
     report_json_path = out_dir / f"{base_name}_{tag}_edl_report.json"
     report_md_path = out_dir / f"{base_name}_{tag}_edl_report.md"
@@ -457,6 +660,7 @@ def _run(args):
     json_path.write_text(json.dumps({
         "project_title": f"{base_name} AI Video Trimmer ({tag})",
         "pacing_style": "text_based_whisper_grounded",
+        "asr_engine": args.asr_engine,
         "agent_verdict": verdict,
         "inference_metrics": inference_metrics,
         "average_cps": avg_cps,
@@ -470,16 +674,43 @@ def _run(args):
     logger.info("==> 7. Wrote CSV cut table: %s", csv_path.name)
 
     xml_path = out_dir / f"{base_name}_{tag}_edl.xml"
-    generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps)
+    generate_fcp7_xml(
+        refined_edl,
+        video_path,
+        total_dur,
+        xml_path,
+        width=width,
+        height=height,
+        fps=fps,
+        punch_in_composite=args.punch_in_composite,
+    )
     logger.info("==> 8. Wrote FCP 7 XML timeline: %s", xml_path.name)
 
     fcpxml_path = out_dir / f"{base_name}_{tag}_edl.fcpxml"
-    generate_fcpxml(refined_edl, video_path, total_dur, total_out_dur, fcpxml_path, fps, width, height)
+    generate_fcpxml(
+        refined_edl,
+        video_path,
+        total_dur,
+        total_out_dur,
+        fcpxml_path,
+        fps=fps,
+        width=width,
+        height=height,
+        punch_in_composite=args.punch_in_composite,
+    )
     logger.info("==> 9. Wrote Final Cut Pro FCPXML timeline: %s", fcpxml_path.name)
 
     out_mp4 = out_dir / f"{base_name}_{tag}_trimmed.mp4"
     logger.info("==> 10. Rendering rough-cut MP4 with FFmpeg: %s ...", out_mp4.name)
-    render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
+    render_cut_video(
+        refined_edl,
+        video_path,
+        out_mp4,
+        crf=args.crf,
+        punch_in_composite=args.punch_in_composite,
+        width=width,
+        height=height,
+    )
     logger.info("==> [Done] Final MP4 rendered (%.1f MB): %s", out_mp4.stat().st_size / (1024 * 1024), out_mp4.name)
 
     if args.strict and not verdict["pass_quality_gate"]:
@@ -490,24 +721,40 @@ def _run(args):
 def main():
     load_env_file()
     default_model = os.environ.get("MODEL_NAME") or os.environ.get("TRIMMER_MODEL") or "gemini-3.8-flash"
+    env_asr = (os.environ.get("ASR_ENGINE") or DEFAULT_ASR_ENGINE).strip().lower()
+    default_asr = env_asr if env_asr in ("chirp3", "whisper") else DEFAULT_ASR_ENGINE
 
-    parser = argparse.ArgumentParser(description="video-trimmer: AI-Powered Smart Video Trimmer (Whisper Ground-Truth + Vertex AI Gemini)")
+    parser = argparse.ArgumentParser(
+        description="video-trimmer: AI-Powered Smart Video Trimmer (Chirp 3 / Whisper Ground-Truth + Vertex AI Gemini)"
+    )
     parser.add_argument("--input", "-i", required=True, help="Path to input video file (.mp4/.mov) or Google Drive share link (https://drive.google.com/... / gdrive://...)")
     parser.add_argument("--output-dir", "-o", default=None, help="Output directory (defaults to <input_dir>/output/, or ./output/ for Google Drive links)")
+    parser.add_argument("--asr-engine", choices=["chirp3", "whisper"], default=default_asr,
+                        help=f"Word-timestamp ASR engine: 'chirp3' (Cloud STT V2, default) or 'whisper' (local MLX/faster-whisper) [default: {default_asr}]")
+    parser.add_argument("--stt-location", default=None,
+                        help="Cloud Speech-to-Text V2 location for Chirp 3 (defaults to STT_LOCATION or 'us')")
+    parser.add_argument("--whisper-model", default=DEFAULT_WHISPER_MODEL,
+                        help=f"Whisper model size when --asr-engine whisper is selected (default: {DEFAULT_WHISPER_MODEL})")
+    parser.add_argument("--language", default="auto",
+                        help="Spoken language code: auto, zh-TW, zh-CN, en, ja, ko (default: auto)")
+    parser.add_argument("--force", action="store_true",
+                        help="Bypass cached word timestamps (<basename>_whisper_raw.json) and force re-transcription")
     parser.add_argument("--model", "-m", default=default_model, help=f"Gemini model name (default: {default_model})")
     parser.add_argument("--project", default=None, help="Google Cloud Project ID (defaults to GOOGLE_CLOUD_PROJECT/GCP_PROJECT or ADC)")
     parser.add_argument("--region", default=None, help="Vertex AI region/location (defaults to GOOGLE_CLOUD_LOCATION/GCP_REGION or 'global')")
-    parser.add_argument("--bucket", default=None, help="GCS bucket for video staging (defaults to VIDEO_TRIMMER_BUCKET)")
+    parser.add_argument("--bucket", default=None, help="GCS bucket for video and Chirp 3 audio staging (defaults to VIDEO_TRIMMER_BUCKET)")
     parser.add_argument("--keep-gcs-upload", action="store_true", help="Retain staged video in GCS instead of deleting after inference")
     parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 CRF quality parameter (default: 18)")
     parser.add_argument("--pacing", "-p", choices=["auto", "dynamic", "compact", "breathing"], default="auto",
                         help="Pacing style: 'auto'/'dynamic' (adaptive CPS margin, default), 'compact', or 'breathing'")
+    parser.add_argument("--punch-in-composite", action="store_true",
+                        help="Apply a subtle 1.12x framing punch-in on composite pick-up splices in MP4 and NLE timelines")
     parser.add_argument("--agentic", action="store_true", help="Enable Gemini Agentic Video Understanding mode")
     parser.add_argument("--suffix", default=None, help="Custom filename tag suffix (defaults to 'agentic' or 'static')")
     parser.add_argument("--script", "-s", default=None, help="Optional reference shooting script or outline (.txt/.md)")
     parser.add_argument("--cached-json", default=None,
                         help="Path to an existing EDL JSON file to bypass cloud Gemini inference")
-    parser.add_argument("--skip-whisper", action="store_true", help="Skip local Whisper transcription and use energy-only fallback")
+    parser.add_argument("--skip-whisper", action="store_true", help="Skip word-level ASR transcription and use energy-only fallback")
     parser.add_argument("--strict", action="store_true", help="Exit with code 2 after writing audit reports if agent_verdict.pass_quality_gate is False")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose DEBUG-level logging")
     args = parser.parse_args()

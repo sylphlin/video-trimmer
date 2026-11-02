@@ -50,13 +50,13 @@ class TestMergeWhisperSegmentsToSentences(unittest.TestCase):
         sentences = merge_whisper_segments_to_sentences(segs)
         assert len(sentences) == 2
 
-    def test_conjunction_at_next_start_prevents_split(self):
+    def test_conjunction_after_pause_and_closure_splits_cleanly_for_llm(self):
         segs = [
             _seg(1, 0.0, 1.0, "他說要來。"),
-            _seg(2, 1.6, 2.0, "但是後來沒有"),  # gap=0.6s >= 0.55s，但下句為連詞開頭且 gap<0.90s
+            _seg(2, 1.6, 2.0, "但是後來沒有"),  # gap=0.6s >= 0.55s and closure punct -> split into 2 Sentence IDs
         ]
         sentences = merge_whisper_segments_to_sentences(segs)
-        assert len(sentences) == 1
+        assert len(sentences) == 2
 
     def test_japanese_chinese_switch_forces_split(self):
         segs = [
@@ -140,4 +140,69 @@ class TestMergeWhisperSegmentsToSentences(unittest.TestCase):
         assert sentences[0]["text"] == "例如你自己"
         assert sentences[1]["text"] == "例如你帶著自己手機"
 
+    def test_chirp3_multichar_cjk_words_split_at_natural_breath_pause(self):
+        """Split multi-character CJK words at physical breath pauses (>= 0.35s) into separate Sentence IDs."""
+        words = [
+            {"word": "今天我們", "start": 0.000, "end": 0.620},
+            {"word": "來介紹核心系統", "start": 0.630, "end": 1.540},
+            # 0.42s breath pause before a partial pick-up or next clause with multi-char Chirp 3 tokens
+            {"word": "核心系統的實測表現", "start": 1.960, "end": 3.120},
+        ]
+        segs = [_seg(1, 0.000, 3.120, "今天我們來介紹核心系統核心系統的實測表現", words=words)]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 2
+        assert sentences[0]["text"] == "今天我們來介紹核心系統"
+        assert sentences[1]["text"] == "核心系統的實測表現"
 
+    def test_is_viable_sub_span_enforces_duration_and_script_neutral_text_thresholds(self):
+        from scripts.transcribe import is_viable_sub_span
+
+        assert is_viable_sub_span("今天我們來介紹", 0.85) is True
+        assert is_viable_sub_span("今天", 0.90) is False
+        assert is_viable_sub_span("今天我們來介紹", 0.35) is False
+        assert is_viable_sub_span("Today we introduce", 0.90) is True
+        assert is_viable_sub_span("Today", 0.90) is False
+        assert is_viable_sub_span("這個API", 0.70) is True
+
+    def test_intra_segment_closure_punct_splits_orphan_confirmation_word(self):
+        """Split intra-segment closure punctuation so trailing orphan confirmation words get their own Sentence ID."""
+        words = [
+            {"word": "打開了", "start": 0.00, "end": 0.45},
+            {"word": "潘朵拉的盒子。", "start": 0.45, "end": 1.25},
+            {"word": "對", "start": 1.32, "end": 1.60},
+        ]
+        segs = [_seg(1, 0.00, 1.60, "打開了潘朵拉的盒子。對", words=words)]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 2
+        assert sentences[0]["text"] == "打開了潘朵拉的盒子。"
+        assert sentences[1]["text"] == "對"
+
+    def test_clause_comma_with_micro_pause_splits_cleanly(self):
+        """Split clauses ending in a comma when followed by a >= 0.18s micro-pause."""
+        segs = [
+            _seg(1, 0.00, 2.00, "第一階段完成訊號採集，"),
+            _seg(2, 2.22, 4.10, "第二階段進行頻譜分析。"),
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 2
+
+    def test_conjunction_led_retakes_split_into_independent_sentence_ids(self):
+        """Ensure repeated conjunction-led retakes across pauses are never welded into one giant Sentence ID."""
+        segs = [
+            _seg(1, 0.00, 1.80, "因為這次實驗環境複雜，"),
+            _seg(2, 2.05, 3.90, "因為這次實驗環境有干擾，"),
+            _seg(3, 4.15, 6.80, "因為這次實驗環境存在多重反射干擾。"),
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 3
+
+    def test_inline_uppercase_acronym_without_pause_not_treated_as_slate(self):
+        """Keep inline technical acronyms (zero pause) inside the surrounding sentence rather than splitting as a slate."""
+        segs = [
+            _seg(1, 0.00, 1.10, "系統會解析"),
+            _seg(2, 1.12, 1.45, "CSI"),
+            _seg(3, 1.47, 2.60, "通道狀態資訊"),
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 1
+        assert "CSI" in sentences[0]["text"]

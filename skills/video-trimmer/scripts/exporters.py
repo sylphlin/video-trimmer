@@ -6,6 +6,14 @@ across standard cinema and broadcast frame rates (23.976 to 60 fps).
 """
 
 from pathlib import Path
+from xml.sax.saxutils import escape
+
+from .constants import COMPOSITE_PUNCH_IN_SCALE
+
+
+def _escape_attr(value: str) -> str:
+    """Escape XML text and double-quote characters for safe XML attribute serialization."""
+    return escape(str(value), {'"': "&quot;"})
 
 
 def _is_ntsc_rate(fps: float) -> bool:
@@ -31,10 +39,23 @@ def _fcpxml_rate_spec(fps: float) -> tuple[int, int, str]:
     return 100, max(100, timebase * 100), f"{timebase}p"
 
 
-def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976):
+def generate_fcp7_xml(
+    edl,
+    video_path,
+    total_source_dur,
+    output_xml_path,
+    width=1920,
+    height=1080,
+    fps=23.976,
+    punch_in_composite: bool = False,
+    punch_in_scale: float = COMPOSITE_PUNCH_IN_SCALE,
+):
     """Generate a Final Cut Pro 7 XML (xmeml v4) timeline for Premiere Pro and DaVinci Resolve."""
     timebase = max(1, int(round(fps)))
     ntsc_flag = "TRUE" if _is_ntsc_rate(fps) else "FALSE"
+    safe_stem = escape(str(video_path.stem))
+    safe_file_name = escape(str(video_path.name))
+    safe_path_url = escape(f"file://localhost{video_path.resolve()}")
 
     def s2f(sec):
         return int(round(sec * fps))
@@ -44,10 +65,10 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         '<!DOCTYPE xmeml>',
         '<xmeml version="4">',
         '  <project>',
-        f'    <name>VideoTrimmer_{video_path.stem}</name>',
+        f'    <name>VideoTrimmer_{safe_stem}</name>',
         '    <children>',
         '      <sequence id="sequence-1">',
-        f'        <name>{video_path.stem}_TrimmerCut</name>',
+        f'        <name>{safe_stem}_TrimmerCut</name>',
         f'        <rate><timebase>{timebase}</timebase><ntsc>{ntsc_flag}</ntsc></rate>',
         '        <media>',
         '          <video>',
@@ -70,23 +91,50 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         start_frame = timeline_cursor
         end_frame = timeline_cursor + dur_frame
         timeline_cursor = end_frame
+        clip_name = escape(f'Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}')
 
         xml_lines.extend([
             f'              <clipitem id="clipitem-v{idx+1}">',
-            f'                <name>Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}</name>',
+            f'                <name>{clip_name}</name>',
             f'                <rate><timebase>{timebase}</timebase><ntsc>{ntsc_flag}</ntsc></rate>',
             f'                <in>{in_frame}</in>',
             f'                <out>{out_frame}</out>',
             f'                <start>{start_frame}</start>',
             f'                <end>{end_frame}</end>',
             f'                <file id="file-1">',
-            f'                  <name>{video_path.name}</name>',
-            f'                  <pathurl>file://localhost{video_path.resolve()}</pathurl>',
+            f'                  <name>{safe_file_name}</name>',
+            f'                  <pathurl>{safe_path_url}</pathurl>',
             f'                  <rate><timebase>{timebase}</timebase><ntsc>{ntsc_flag}</ntsc></rate>',
             f'                  <duration>{s2f(total_source_dur)}</duration>',
             '                </file>',
-            '              </clipitem>'
         ])
+        if clip.get("is_composite_splice"):
+            if punch_in_composite:
+                scale_pct = round(float(punch_in_scale) * 100.0, 1)
+                xml_lines.extend([
+                    '                <filter>',
+                    '                  <effect>',
+                    '                    <name>Basic Motion</name>',
+                    '                    <effectid>basic</effectid>',
+                    '                    <effecttype>motion</effecttype>',
+                    '                    <mediatype>video</mediatype>',
+                    '                    <parameter>',
+                    '                      <parameterid>scale</parameterid>',
+                    '                      <name>Scale</name>',
+                    f'                      <value>{scale_pct}</value>',
+                    '                    </parameter>',
+                    '                  </effect>',
+                    '                </filter>',
+                ])
+            xml_lines.extend([
+                '                <marker>',
+                '                  <name>Composite Splice (Pick-up)</name>',
+                '                  <comment>Composite pick-up seam</comment>',
+                f'                  <in>{in_frame}</in>',
+                '                  <out>-1</out>',
+                '                </marker>',
+            ])
+        xml_lines.append('              </clipitem>')
 
     xml_lines.extend([
         '            </track>',
@@ -103,10 +151,11 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         start_frame = timeline_cursor
         end_frame = timeline_cursor + dur_frame
         timeline_cursor = end_frame
+        clip_name = escape(f'Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}')
 
         xml_lines.extend([
             f'              <clipitem id="clipitem-a{idx+1}">',
-            f'                <name>Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}</name>',
+            f'                <name>{clip_name}</name>',
             f'                <rate><timebase>{timebase}</timebase><ntsc>{ntsc_flag}</ntsc></rate>',
             f'                <in>{in_frame}</in>',
             f'                <out>{out_frame}</out>',
@@ -138,10 +187,15 @@ def generate_fcpxml(
     fps=23.976,
     width=1920,
     height=1080,
+    punch_in_composite: bool = False,
+    punch_in_scale: float = COMPOSITE_PUNCH_IN_SCALE,
 ):
     """Generate an Apple Final Cut Pro FCPXML (v1.9) timeline across 23.976 to 60 fps."""
     frame_num, frame_den, rate_tag = _fcpxml_rate_spec(fps)
     exact_fps = frame_den / frame_num
+    safe_stem = _escape_attr(video_path.stem)
+    safe_file_name = _escape_attr(video_path.name)
+    safe_src_url = _escape_attr(f"file://localhost{video_path.resolve()}")
 
     def sec_to_frames(sec):
         return int(round(sec * exact_fps))
@@ -161,10 +215,23 @@ def generate_fcpxml(
         start_frac = frames_to_fraction(start_frames)
         dur_frac = frames_to_fraction(dur_frames)
         offset_frames += dur_frames
-        name = f"Clip_{clip['clip_id']:02d}_{clip['topic'][:15]}"
-        clip_elements.append(
-            f'            <asset-clip name="{name}" ref="r2" offset="{offset_frac}" start="{start_frac}" duration="{dur_frac}"/>'
-        )
+        name = _escape_attr(f"Clip_{clip['clip_id']:02d}_{clip['topic'][:15]}")
+        if clip.get("is_composite_splice"):
+            clip_elements.append(
+                f'            <asset-clip name="{name}" ref="r2" offset="{offset_frac}" start="{start_frac}" duration="{dur_frac}">'
+            )
+            if punch_in_composite:
+                # FCPXML v1.9 DTD requires <adjust-transform> strictly before <marker>
+                scale_str = f"{float(punch_in_scale):.2f}"
+                clip_elements.append(f'              <adjust-transform scale="{scale_str} {scale_str}"/>')
+            clip_elements.append(
+                f'              <marker start="{start_frac}" duration="{frame_num}/{frame_den}s" value="Composite Splice (Pick-up)"/>'
+            )
+            clip_elements.append('            </asset-clip>')
+        else:
+            clip_elements.append(
+                f'            <asset-clip name="{name}" ref="r2" offset="{offset_frac}" start="{start_frac}" duration="{dur_frac}"/>'
+            )
 
     seq_frames = offset_frames if offset_frames > 0 else sec_to_frames(total_out_dur)
     total_out_frac = frames_to_fraction(seq_frames)
@@ -175,11 +242,11 @@ def generate_fcpxml(
         '<fcpxml version="1.9">',
         '  <resources>',
         f'    <format id="r1" name="FFVideoFormat{height}p{rate_tag}" frameDuration="{frame_num}/{frame_den}s" width="{width}" height="{height}"/>',
-        f'    <asset id="r2" name="{video_path.name}" src="file://localhost{video_path.resolve()}" start="0s" duration="{total_src_frac}" hasVideo="1" hasAudio="1" format="r1"/>',
+        f'    <asset id="r2" name="{safe_file_name}" src="{safe_src_url}" start="0s" duration="{total_src_frac}" hasVideo="1" hasAudio="1" format="r1"/>',
         '  </resources>',
         '  <library>',
-        f'    <event name="VideoTrimmer_{video_path.stem}">',
-        f'      <project name="{video_path.stem}_TrimmerCut">',
+        f'    <event name="VideoTrimmer_{safe_stem}">',
+        f'      <project name="{safe_stem}_TrimmerCut">',
         f'        <sequence format="r1" duration="{total_out_frac}">',
         '          <spine>'
     ]

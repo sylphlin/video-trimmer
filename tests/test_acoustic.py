@@ -102,3 +102,90 @@ class TestRefineSpeechBoundsLocked(unittest.TestCase):
             prev_sentence_end=prev_sentence_end,
         )
         assert final_in_capped >= prev_sentence_end - 1e-9
+
+    def test_tight_seam_margins_use_compact_40ms_buffers_on_composite_cuts(self):
+        """Verify tight_in_seam and tight_out_seam tighten splice buffers relative to normal speech padding."""
+        audio = np.concatenate([_silence(0.5), _sine(1.0), _silence(0.5)])
+        total_dur = len(audio) / SR
+
+        norm_in, norm_out, _, _, _ = refine_speech_bounds_locked(
+            audio, SR, t_first=0.5, t_last=1.5, total_dur=total_dur, transcript="慢速講話",
+        )
+        tight_in, tight_out, _, _, _ = refine_speech_bounds_locked(
+            audio,
+            SR,
+            t_first=0.5,
+            t_last=1.5,
+            total_dur=total_dur,
+            transcript="慢速講話",
+            tight_in_seam=True,
+            tight_out_seam=True,
+        )
+        assert tight_in >= norm_in
+        assert tight_out <= norm_out
+
+
+class TestCompositeAcousticHelpers(unittest.TestCase):
+    def test_clamp_post_pause_word_onset_trims_inflated_pre_speech_breath_and_silence(self):
+        """Clamp inflated post-pause word start (containing pre-pickup breath + silence) to true speech onset."""
+        from scripts.acoustic import clamp_post_pause_word_onset
+
+        # 0.0-0.1s breath blip, 0.1-0.35s silence valley (>120ms), 0.35-0.85s real word voiced core
+        breath = _sine(0.08, amplitude=0.04)
+        valley = _silence(0.27)
+        core = _sine(0.50, amplitude=0.35)
+        audio = np.concatenate([_silence(0.2), breath, valley, core, _silence(0.2)])
+
+        clamped = clamp_post_pause_word_onset(
+            audio,
+            SR,
+            word_start=0.20,
+            word_end=1.05,
+            prev_word_end=0.10,
+            gap_before=0.50,
+            is_trimmed_head=True,
+        )
+        assert clamped >= 0.50
+        assert clamped <= 0.60
+
+    def test_find_optimal_overlap_pivot_prefers_low_energy_pause_boundary(self):
+        """Select pivot p where a clean inter-word pause exists inside the shared overlap region."""
+        from scripts.acoustic import find_optimal_overlap_pivot
+
+        # Prefix words: [0.0..0.8 "今天我們"], [0.8..1.5 "介紹"], [1.8..2.4 "核心"] (300ms pause after "介紹" -> p=1!)
+        # Cont words:   [3.0..3.6 "介紹"], [3.9..4.5 "核心"], [4.5..5.4 "系統架構"] (300ms pause after "介紹" -> p=1!)
+        audio = np.concatenate([
+            _sine(1.5, amplitude=0.25),
+            _silence(0.30),
+            _sine(0.6, amplitude=0.25),
+            _silence(0.60),
+            _sine(0.6, amplitude=0.25),
+            _silence(0.30),
+            _sine(1.5, amplitude=0.25),
+        ])
+        prefix_words = [
+            {"word": "今天我們", "start": 0.0, "end": 0.8},
+            {"word": "介紹", "start": 0.8, "end": 1.5},
+            {"word": "核心", "start": 1.8, "end": 2.4},
+        ]
+        cont_words = [
+            {"word": "介紹", "start": 3.0, "end": 3.6},
+            {"word": "核心", "start": 3.9, "end": 4.5},
+            {"word": "系統架構", "start": 4.5, "end": 5.4},
+        ]
+        best_p = find_optimal_overlap_pivot(audio, SR, prefix_words, cont_words, overlap_word_count=2)
+        assert best_p == 1
+
+    def test_compute_composite_gain_db_compensates_energetic_pickup_within_bounds(self):
+        """Return 0.0 dB for small level differences and bounded negative gain when pick-up is much louder."""
+        from scripts.acoustic import compute_composite_gain_db
+
+        quiet_prefix = _sine(1.0, amplitude=0.12)
+        loud_pickup = _sine(1.0, amplitude=0.36)  # ~ +9.5 dB louder
+        audio = np.concatenate([quiet_prefix, loud_pickup])
+
+        gain_db = compute_composite_gain_db(audio, SR, (0.0, 1.0), (1.0, 2.0))
+        assert -4.5 <= gain_db <= -1.5
+
+        same_gain = compute_composite_gain_db(audio, SR, (0.0, 0.5), (0.5, 1.0))
+        assert same_gain == 0.0

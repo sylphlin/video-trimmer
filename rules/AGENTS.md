@@ -9,9 +9,10 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 - Resolve `<PLUGIN_ROOT>` as two directory levels above `skills/video-trimmer/SKILL.md` (`../../`, e.g., `/Users/sylph/.gemini/config/plugins/video-trimmer`).
 - Set `Cwd` to `<PLUGIN_ROOT>` and run `python3 skills/video-trimmer/scripts/video_trimmer.py` directly with `run_command` after verifying the environment (`Step 1`). Do NOT search for global `video-trimmer` CLI aliases with `find_by_name` or `list_dir`.
 
-## 2. Fail-Fast on Cloud Errors, Quality Gate (`agent_verdict`), & One-Shot Self-Healing Protocol
+## 2. Explicit ASR Engine Selection, Fail-Fast on Cloud Errors, Quality Gate (`agent_verdict`), & One-Shot Self-Healing Protocol
+- Always default to the primary Cloud Speech-to-Text V2 Chirp 3 engine (`--asr-engine chirp3`). Pass `--asr-engine whisper` ONLY when the user explicitly requests Whisper or local acoustic transcription in their prompt.
 - If a script fails with exit code `1` (such as 401 Unauthorized, 403 Forbidden, Quota Exceeded, missing Application Default Credentials, or missing FFmpeg):
-  - Stop immediately.
+  - Stop immediately. Do NOT retry or silently downgrade to `--asr-engine whisper`.
   - Show the exact error message and exit status to the user.
   - Give a clear, actionable solution to the user (for example, run `./setup.sh --project YOUR_PROJECT_ID`, run `gcloud auth application-default login`, or install FFmpeg).
   - Do NOT try to modify the script, probe different code paths, or rewrite logic.
@@ -23,14 +24,15 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 ## 3. Strict Zero-Emoji Policy & Dynamic Language Mirroring
 - Do NOT use emojis or decorative icons in headings or tables in generated Markdown reports or EDL notes.
 - Keep all documentation and reports in plain, professional technical text.
-- Always respond to the user in their prompt language (Traditional Chinese `zh-TW` when prompted in Traditional Chinese, English when prompted in English, Japanese when prompted in Japanese, etc.).
+- Always respond to the user in their prompt language (Traditional Chinese `zh-TW` when prompted in Traditional Chinese, English when prompted in English, Japanese when prompted in Japanese, etc.) and pass `--language` when specified.
 
-## 4. Acoustic Ground Truth & Dual-Mode Take Arbitration Integrity
+## 4. Acoustic Ground Truth, Dual-Mode Take Arbitration, & Composite Pick-Up Integrity
 - Execute the workflow defined in `skills/video-trimmer/SKILL.md`.
 - Pass `-s <SCRIPT_FILE>` whenever the user provides a reference shooting script or outline to activate Mode A (Monotonic Script-Anchored Alignment); omit `-s` for unscripted recordings to activate Mode B (Unscripted Intent-Window Arbitration).
-- All cut points and keep-ranges must respect the Whisper word-level acoustic ground truth (`word_timestamps=True`), onset snapping, and `Sentence ID` boundaries.
-- Do NOT truncate speech phonemes or spoken words. Maintain dynamic speech padding and equal-power audio micro-crossfades (`iqsin`/`qsin`) to eliminate audio pop artifacts.
+- All cut points, composite pick-up splices, and keep-ranges must respect physical word-level acoustic ground truth (`chirp3` default or `whisper` optional), post-pause onset clamping, `Sentence ID` boundaries, and `next_word_hard_wall` locks.
+- Do NOT truncate speech phonemes or spoken words. Maintain dynamic speech padding, composite loudness gain matching, and equal-power audio micro-crossfades (`iqsin`/`qsin`) to eliminate audio pop artifacts.
 
 ## 5. Default Static Multimodal Execution
 - Run `video_trimmer.py` in `<PLUGIN_ROOT>` in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) for fast, timeout-free inference.
 - Include `--agentic` only when the user explicitly requests Agentic Video Understanding mode.
+- Include `--punch-in-composite` when the user requests framing punch-in (`1.12x`) on composite pick-up splices.

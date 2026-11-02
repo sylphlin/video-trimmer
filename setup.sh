@@ -160,14 +160,17 @@ echo "[✓] Service Account:    $SERVICE_ACCOUNT"
 # 3.5. Enable Required Google Cloud APIs & Verify ADC (with Google Drive Scope)
 # ------------------------------------------------------------------------------
 echo ""
-echo "[*] Enabling required Google Cloud APIs (Vertex AI, GCS, Google Drive)..."
+echo "[*] Enabling required Google Cloud APIs (Vertex AI, Cloud STT V2, GCS, Google Drive, IAM)..."
 if [ "$DRY_RUN" = false ]; then
     gcloud services enable \
         aiplatform.googleapis.com \
+        speech.googleapis.com \
         storage.googleapis.com \
-        drive.googleapis.com iam.googleapis.com iamcredentials.googleapis.com iamcredentials.googleapis.com \
+        drive.googleapis.com \
+        iam.googleapis.com \
+        iamcredentials.googleapis.com \
         --project="$PROJECT_ID" --quiet 2>/dev/null || true
-    echo "    [✓] Enabled aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com iam.googleapis.com iamcredentials.googleapis.com iamcredentials.googleapis.com."
+    echo "    [✓] Enabled aiplatform, speech, storage, drive, iam, and iamcredentials APIs."
 
     ADC_SCOPES="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly"
     ADC_TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null || true)"
@@ -185,7 +188,7 @@ if [ "$DRY_RUN" = false ]; then
     fi
     gcloud auth application-default set-quota-project "$PROJECT_ID" --quiet 2>/dev/null || true
 else
-    echo "    [Dry-Run] Would enable aiplatform.googleapis.com, storage.googleapis.com, drive.googleapis.com iam.googleapis.com iamcredentials.googleapis.com iamcredentials.googleapis.com and verify ADC scopes."
+    echo "    [Dry-Run] Would enable aiplatform.googleapis.com, speech.googleapis.com, storage.googleapis.com, drive.googleapis.com, iam.googleapis.com, iamcredentials.googleapis.com and verify ADC scopes."
 fi
 
 # ------------------------------------------------------------------------------
@@ -225,7 +228,7 @@ EOF
     echo "    [✓] Applied CORS configuration (24h cache, GET/HEAD)."
 
     # Configure Lifecycle Rules:
-    # - raw/: Delete after 2 days (ephemeral video staging auto-cleanup)
+    # - raw/: Delete after 2 days (ephemeral video and Chirp 3 audio staging auto-cleanup)
     LIFECYCLE_FILE="$(mktemp 2>/dev/null || echo "/tmp/lifecycle_$$.json")"
     cat << 'EOF' > "$LIFECYCLE_FILE"
 {
@@ -262,6 +265,9 @@ echo "[*] Step 2: Provisioning Dedicated Service Account & Least-Privilege IAM..
 
 SA_NAME="${SERVICE_ACCOUNT%%@*}"
 if [ "$DRY_RUN" = false ]; then
+    gcloud beta services identity create --service=speech.googleapis.com --project="$PROJECT_ID" --quiet 2>/dev/null || \
+        gcloud services identity create --service=speech.googleapis.com --project="$PROJECT_ID" --quiet 2>/dev/null || true
+
     if ! gcloud iam service-accounts describe "$SERVICE_ACCOUNT" --project="$PROJECT_ID" &>/dev/null; then
         echo "    [*] Creating dedicated service account: $SERVICE_ACCOUNT..."
         gcloud iam service-accounts create "$SA_NAME" \
@@ -275,15 +281,13 @@ if [ "$DRY_RUN" = false ]; then
 
     # Project-level IAM bindings
     echo "    [*] Verifying project IAM bindings for $SERVICE_ACCOUNT..."
-    gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-        --member="serviceAccount:$SERVICE_ACCOUNT" \
-        --role="roles/aiplatform.user" \
-        --condition=None --quiet 2>/dev/null || true
-    gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-        --member="serviceAccount:$SERVICE_ACCOUNT" \
-        --role="roles/logging.logWriter" \
-        --condition=None --quiet 2>/dev/null || true
-    echo "    [✓] Granted roles/aiplatform.user and roles/logging.logWriter."
+    for role in "roles/aiplatform.user" "roles/speech.client" "roles/logging.logWriter"; do
+        gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+            --member="serviceAccount:$SERVICE_ACCOUNT" \
+            --role="$role" \
+            --condition=None --quiet 2>/dev/null || true
+    done
+    echo "    [✓] Granted roles/aiplatform.user, roles/speech.client, and roles/logging.logWriter."
 
     # Bucket-level least-privilege IAM bindings
     echo "    [*] Verifying storage IAM bindings on gs://$BUCKET_NAME..."
@@ -291,13 +295,14 @@ if [ "$DRY_RUN" = false ]; then
         --member="serviceAccount:$SERVICE_ACCOUNT" \
         --role="roles/storage.objectUser" --quiet 2>/dev/null || true
 
-    # Grant storage.objectUser to Vertex AI Service Agents
+    # Grant storage.objectUser to Vertex AI and Cloud Speech-to-Text Service Agents
     if [ -n "$PROJECT_NUMBER" ]; then
-        VERTEX_AGENTS=(
+        CLOUD_AGENTS=(
             "service-${PROJECT_NUMBER}@gcp-sa-aiplatform.iam.gserviceaccount.com"
             "service-${PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
+            "service-${PROJECT_NUMBER}@gcp-sa-speech.iam.gserviceaccount.com"
         )
-        for sa in "${VERTEX_AGENTS[@]}"; do
+        for sa in "${CLOUD_AGENTS[@]}"; do
             gcloud storage buckets add-iam-policy-binding "gs://$BUCKET_NAME" \
                 --member="serviceAccount:$sa" \
                 --role="roles/storage.objectUser" --quiet 2>/dev/null || true
@@ -305,8 +310,8 @@ if [ "$DRY_RUN" = false ]; then
     fi
     echo "    [✓] Granted roles/storage.objectUser on gs://$BUCKET_NAME."
 else
-    echo "    [Dry-Run] Would ensure service account $SERVICE_ACCOUNT exists with roles/aiplatform.user and roles/logging.logWriter."
-    echo "    [Dry-Run] Would grant roles/storage.objectUser on gs://$BUCKET_NAME to $SERVICE_ACCOUNT and Vertex AI service agents."
+    echo "    [Dry-Run] Would ensure service account $SERVICE_ACCOUNT exists with roles/aiplatform.user, roles/speech.client, and roles/logging.logWriter."
+    echo "    [Dry-Run] Would grant roles/storage.objectUser on gs://$BUCKET_NAME to $SERVICE_ACCOUNT, Vertex AI, and Speech-to-Text service agents."
 fi
 
 # ------------------------------------------------------------------------------
@@ -326,6 +331,10 @@ GCP_REGION=$REGION
 
 # GCS Staging Bucket (project name suffix)
 VIDEO_TRIMMER_BUCKET=$BUCKET_NAME
+
+# Cloud Speech-to-Text V2 Word-Level Acoustic Engine
+STT_LOCATION=us
+TRANSCRIBE_MODEL=chirp_3
 
 # Default Multimodal Model
 MODEL_NAME=gemini-3.8-flash
@@ -355,6 +364,10 @@ for k, v in updates.items():
     else:
         content += f"\n{replacement}"
 
+if "STT_LOCATION=" not in content:
+    content += "\nSTT_LOCATION=us"
+if "TRANSCRIBE_MODEL=" not in content:
+    content += "\nTRANSCRIBE_MODEL=chirp_3"
 if "MODEL_NAME=" not in content:
     content += "\nMODEL_NAME=gemini-3.8-flash"
 
@@ -364,7 +377,7 @@ PYEOF
         echo "    [✓] Updated existing .env file with active settings."
     fi
 else
-    echo "    [Dry-Run] Would write/update .env with GOOGLE_CLOUD_PROJECT=$PROJECT_ID and VIDEO_TRIMMER_BUCKET=$BUCKET_NAME."
+    echo "    [Dry-Run] Would write/update .env with GOOGLE_CLOUD_PROJECT=$PROJECT_ID, VIDEO_TRIMMER_BUCKET=$BUCKET_NAME, STT_LOCATION=us, and TRANSCRIBE_MODEL=chirp_3."
 fi
 
 echo ""

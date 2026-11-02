@@ -249,3 +249,119 @@ class TestResolveOutputDir(unittest.TestCase):
             self.assertTrue(out_dir.is_dir())
 
 
+class TestCompositeMarkersAndPunchIn(unittest.TestCase):
+    """Verify composite pick-up markers, DTD-valid transform order, XML escaping, and FFmpeg punch-in."""
+
+    def _composite_edl(self):
+        return [
+            {
+                "clip_id": 1,
+                "topic": 'Prefix "A&B"',
+                "source_in": 1.0,
+                "source_out": 2.2,
+                "duration": 1.2,
+                "composite_role": "prefix",
+                "is_composite_splice": False,
+                "gain_db": 0.0,
+            },
+            {
+                "clip_id": 2,
+                "topic": "Pick-up <C>",
+                "source_in": 3.0,
+                "source_out": 4.5,
+                "duration": 1.5,
+                "composite_role": "continuation",
+                "is_composite_splice": True,
+                "gain_db": -2.25,
+            },
+        ]
+
+    def test_fcpxml_composite_marker_and_transform_follow_strict_v1_9_dtd_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "raw_footage.mp4"
+            video_path.write_bytes(b"")
+            fcpxml_path = tmp_path / "composite.fcpxml"
+
+            generate_fcpxml(
+                self._composite_edl(),
+                video_path,
+                total_source_dur=10.0,
+                total_out_dur=2.7,
+                output_fcpxml_path=fcpxml_path,
+                fps=30.0,
+                width=1920,
+                height=1080,
+                punch_in_composite=True,
+            )
+
+            root = ET.parse(fcpxml_path).getroot()
+            clips = root.findall(".//asset-clip")
+            self.assertEqual(len(clips), 2)
+            self.assertEqual(list(clips[0]), [])
+            child_tags = [child.tag for child in clips[1]]
+            self.assertEqual(child_tags, ["adjust-transform", "marker"])
+            self.assertEqual(clips[1].find("adjust-transform").get("scale"), "1.12 1.12")
+            self.assertEqual(clips[1].find("marker").get("value"), "Composite Splice (Pick-up)")
+
+    def test_fcp7_xml_composite_marker_and_basic_motion_scale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "raw_footage.mp4"
+            video_path.write_bytes(b"")
+            xml_path = tmp_path / "composite.xml"
+
+            generate_fcp7_xml(
+                self._composite_edl(),
+                video_path,
+                total_source_dur=10.0,
+                output_xml_path=xml_path,
+                width=1920,
+                height=1080,
+                fps=30.0,
+                punch_in_composite=True,
+            )
+
+            root = ET.parse(xml_path).getroot()
+            v_clips = root.findall(".//video//clipitem")
+            self.assertEqual(len(v_clips), 2)
+            self.assertIsNone(v_clips[0].find("marker"))
+            self.assertIsNotNone(v_clips[1].find("marker"))
+            self.assertEqual(v_clips[1].find("marker/name").text, "Composite Splice (Pick-up)")
+            self.assertEqual(v_clips[1].find(".//parameter[parameterid='scale']/value").text, "112.0")
+
+    def test_real_ffmpeg_punch_in_composite_and_gain_db_on_854x480(self):
+        import shutil
+        import subprocess
+        from scripts.render import _build_render_cmd, render_cut_video
+
+        edl = [
+            {"clip_id": 1, "topic": "Prefix", "source_in": 0.1, "source_out": 0.5, "duration": 0.4, "is_composite_splice": False, "gain_db": 0.0},
+            {"clip_id": 2, "topic": "Pickup", "source_in": 0.7, "source_out": 1.2, "duration": 0.5, "is_composite_splice": True, "gain_db": -2.25},
+        ]
+        cmd_str = " ".join(_build_render_cmd(edl, "raw_footage.mp4", "out.mp4", punch_in_composite=True, width=854, height=480))
+        self.assertIn("crop=trunc(iw/1.1200/2)*2:trunc(ih/1.1200/2)*2", cmd_str)
+        self.assertIn("volume=-2.25dB,", cmd_str)
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_mp4 = tmp_path / "synthetic_854x480.mp4"
+            out_mp4 = tmp_path / "synthetic_punchin.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", "color=c=navy:s=854x480:r=30:d=1.5",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1.5",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "15",
+                    "-c:a", "aac",
+                    str(src_mp4),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            render_cut_video(edl, src_mp4, out_mp4, crf=24, punch_in_composite=True, width=854, height=480)
+            self.assertTrue(out_mp4.exists())
+            self.assertGreater(out_mp4.stat().st_size, 0)

@@ -288,6 +288,218 @@ class TestAlignClipWithWhisper(unittest.TestCase):
         assert sub_units[0]["transcript"] == "研究者推測，BFI 本來就是壓縮後的資訊。"
         assert sub_units[0]["whisper_transcript"] == "研究者推測BFI本來就是壓縮後的資訊"
 
+    def test_cjk_intra_token_proportional_interpolation_slices_multichar_word(self):
+        """Interpolate word boundaries proportionally when a trim cut lands inside a multi-char CJK token."""
+        s1 = {
+            "id": 1,
+            "start": 10.0,
+            "end": 12.0,
+            "text": "今天我們介紹核心架構",
+            "words": [
+                {"word": "今天我們", "start": 10.0, "end": 10.8},
+                # 4-character CJK word spanning [10.8, 11.6]; keeping only "介紹" (2/4 chars) -> end = 11.2
+                {"word": "介紹核心", "start": 10.8, "end": 11.6},
+                {"word": "架構", "start": 11.6, "end": 12.0},
+            ],
+        }
+        clip = {
+            "sentence_ids": [1],
+            "transcript": "今天我們介紹",
+            "composite_role": "prefix",
+            "topic": "Opening Prefix",
+        }
+        sub_units = resolve_clip_sub_units([s1], clip, total_dur=30.0)
+        assert len(sub_units) == 1
+        su = sub_units[0]
+        assert su["t_first"] == pytest.approx(10.0, abs=0.01)
+        assert su["t_last"] == pytest.approx(11.2, abs=0.02)
+        assert su["next_word_hard_wall"] == pytest.approx(11.2, abs=0.02)
+        assert su["composite_role"] == "prefix"
 
+    def test_intra_sentence_mid_span_stumble_excision_splits_into_prefix_and_continuation(self):
+        """Excise an internal stumble (A + B_ng + B_ok + C) into a Last-Take-Anchored prefix + continuation pair."""
+        s1 = {
+            "id": 1,
+            "start": 20.0,
+            "end": 26.0,
+            "text": "今天我們來介紹核心系統呃核心系統的三個關鍵指標",
+            "words": [
+                {"word": "今天我們", "start": 20.00, "end": 20.70},
+                {"word": "來介紹", "start": 20.70, "end": 21.30},
+                {"word": "核心系統", "start": 21.32, "end": 22.10},
+                {"word": "呃", "start": 22.12, "end": 22.45},
+                {"word": "核心系統", "start": 22.60, "end": 23.40},
+                {"word": "的三個", "start": 23.40, "end": 24.20},
+                {"word": "關鍵指標", "start": 24.20, "end": 25.60},
+            ],
+        }
+        clip = {
+            "sentence_ids": [1],
+            "transcript": "今天我們來介紹核心系統的三個關鍵指標。",
+            "topic": "Key Metrics",
+        }
+        sub_units = resolve_clip_sub_units([s1], clip, total_dur=40.0)
+        assert len(sub_units) == 2
+        pref, cont = sub_units[0], sub_units[1]
+        assert pref["composite_role"] == "prefix"
+        assert pref["is_composite_splice"] is False
+        assert pref["t_first"] == pytest.approx(20.00, abs=0.02)
+        assert pref["t_last"] == pytest.approx(21.30, abs=0.02)
+        assert pref["next_word_hard_wall"] == pytest.approx(21.32, abs=0.02)
 
+        assert cont["composite_role"] == "continuation"
+        assert cont["is_composite_splice"] is True
+        assert cont["t_first"] == pytest.approx(22.60, abs=0.02)
+        assert cont["t_last"] == pytest.approx(25.60, abs=0.02)
+        assert cont["prev_sentence_end"] == pytest.approx(22.45, abs=0.02)
 
+    def test_micro_prefix_below_viability_gate_is_rejected_in_favor_of_clean_restart(self):
+        """Reject sub-0.55s / <4-char micro-prefixes so choppy single-word fragments are never emitted."""
+        s1 = {
+            "id": 1,
+            "start": 5.0,
+            "end": 9.0,
+            "text": "今天呃今天我們來說明完整架構",
+            "words": [
+                {"word": "今天", "start": 5.00, "end": 5.30},
+                {"word": "呃", "start": 5.32, "end": 5.55},
+                {"word": "今天我們", "start": 5.70, "end": 6.50},
+                {"word": "來說明", "start": 6.50, "end": 7.30},
+                {"word": "完整架構", "start": 7.30, "end": 8.60},
+            ],
+        }
+        clip = {
+            "sentence_ids": [1],
+            "transcript": "今天我們來說明完整架構。",
+            "topic": "Clean Restart",
+        }
+        sub_units = resolve_clip_sub_units([s1], clip, total_dur=20.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_first"] == pytest.approx(5.70, abs=0.02)
+        assert sub_units[0]["t_last"] == pytest.approx(8.60, abs=0.02)
+        assert sub_units[0]["trimmed_head"] is True
+
+    def test_cached_json_replay_preserves_composite_sub_span_bounds_and_flags(self):
+        """Verify --cached-json replay keeps exact sub-span word bounds and composite metadata."""
+        s2 = {
+            "id": 2,
+            "start": 30.0,
+            "end": 35.0,
+            "text": "不過沒關係核心系統運作非常穩定",
+            "words": [
+                {"word": "不過沒關係", "start": 30.00, "end": 31.10},
+                {"word": "核心系統", "start": 31.25, "end": 32.20},
+                {"word": "運作非常穩定", "start": 32.20, "end": 34.80},
+            ],
+        }
+        cached_clip = {
+            "sentence_ids": [2],
+            "t_first": 31.25,
+            "t_last": 34.80,
+            "trimmed_head": True,
+            "trimmed_tail": False,
+            "composite_role": "continuation",
+            "is_composite_splice": True,
+            "transcript": "核心系統運作非常穩定。",
+            "topic": "Cached Continuation",
+        }
+        sub_units = resolve_clip_sub_units([s2], cached_clip, total_dur=50.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_first"] == pytest.approx(31.25, abs=0.01)
+        assert sub_units[0]["t_last"] == pytest.approx(34.80, abs=0.01)
+        assert sub_units[0]["prev_sentence_end"] == pytest.approx(31.10, abs=0.01)
+        assert sub_units[0]["composite_role"] == "continuation"
+        assert sub_units[0]["is_composite_splice"] is True
+
+    def test_homophone_first_word_preserved_without_truncating_opening(self):
+        """Preserve t_first when the opening character differs only by an ASR/script homophone (e.g. 儘量 vs 盡量)."""
+        s1 = _sentence(
+            1,
+            10.00,
+            12.40,
+            "儘量減少干擾與雜訊",
+            [
+                {"word": "儘", "start": 10.00, "end": 10.22},
+                {"word": "量減少干擾與雜訊", "start": 10.24, "end": 12.40},
+            ],
+        )
+        clip = {
+            "sentence_ids": [1],
+            "transcript": "盡量減少干擾與雜訊。",
+            "topic": "Homophone Head",
+        }
+        sub_units = resolve_clip_sub_units([s1], clip, total_dur=30.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_first"] == pytest.approx(10.00, abs=0.01)
+        assert sub_units[0]["trimmed_head"] is False
+
+    def test_one_char_opening_word_not_dropped_when_sentence_has_mid_homophone(self):
+        """Ensure sliding window never drops a 1-char opening word (e.g. 並) when a mid-sentence homophone exists."""
+        s1 = _sentence(
+            11,
+            20.00,
+            23.50,
+            "並計算出反射路徑與訊號強度分佈",
+            [
+                {"word": "並", "start": 20.00, "end": 20.25},
+                {"word": "計算出反射路徑與訊號強度", "start": 20.26, "end": 22.90},
+                {"word": "分佈", "start": 22.92, "end": 23.50},
+            ],
+        )
+        clip = {
+            "sentence_ids": [11],
+            "transcript": "並計算出反射路徑與信號強度",
+            "topic": "Opening Conjunction Word",
+        }
+        sub_units = resolve_clip_sub_units([s1], clip, total_dur=40.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_first"] == pytest.approx(20.00, abs=0.01)
+        assert sub_units[0]["t_last"] == pytest.approx(22.90, abs=0.02)
+
+    def test_two_char_opening_stutter_skipped_even_with_downstream_homophone(self):
+        """Skip a 2-char opening stutter (簡單簡單...) even when w_len == t_len + 2 and a downstream homophone exists."""
+        s1 = _sentence(
+            15,
+            50.00,
+            54.20,
+            "簡單簡單模型就能還原無線訊號",
+            [
+                {"word": "簡單", "start": 50.00, "end": 50.45},
+                {"word": "簡單", "start": 50.55, "end": 51.00},
+                {"word": "模型就能還原無線訊號", "start": 51.02, "end": 54.20},
+            ],
+        )
+        clip = {
+            "sentence_ids": [15],
+            "transcript": "簡單模型就能還原無線信號。",
+            "topic": "Opening Stutter Skip",
+        }
+        sub_units = resolve_clip_sub_units([s1], clip, total_dur=60.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_first"] == pytest.approx(50.55, abs=0.01)
+        assert sub_units[0]["t_last"] == pytest.approx(54.20, abs=0.01)
+        assert sub_units[0]["trimmed_head"] is True
+
+    def test_single_char_trailing_trim_on_long_sentence_not_bypassed_by_length_ratio(self):
+        """Honor a 1-char trailing trim (e.g. removing orphan 對) even when len(tgt_norm)/len(whisper_str) > 0.95."""
+        clean_body = "這項無線感測研究證明不需要安裝任何額外硬體就能在室內環境完成高精度定位與動作辨識"
+        s1 = _sentence(
+            1,
+            5.00,
+            13.80,
+            clean_body + "對",
+            [
+                {"word": clean_body, "start": 5.00, "end": 13.10},
+                {"word": "對", "start": 13.35, "end": 13.80},
+            ],
+        )
+        clip = {
+            "sentence_ids": [1],
+            "transcript": clean_body + "。",
+            "topic": "Long Sentence Single-Char Tail Trim",
+        }
+        sub_units = resolve_clip_sub_units([s1], clip, total_dur=20.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_last"] == pytest.approx(13.10, abs=0.01)
+        assert sub_units[0]["trimmed_tail"] is True
+        assert sub_units[0]["next_word_hard_wall"] == pytest.approx(13.349, abs=0.005)

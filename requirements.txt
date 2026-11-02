@@ -7,7 +7,7 @@ soundfile>=0.12.1
 numpy>=1.24.0
 tenacity>=8.2.0
 
-# Whisper ASR backends (at least one recommended)
+# Optional local Whisper ASR backends (used when --asr-engine whisper is selected)
 # For macOS Apple Silicon (Metal GPU acceleration):
 mlx-whisper>=0.4.0; sys_platform == 'darwin'
 

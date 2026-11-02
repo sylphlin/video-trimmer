@@ -521,3 +521,312 @@ class TestAuditEdlQuality(unittest.TestCase):
         self.assertTrue(any("ERR_SCRIPT_TAKE_COLLISION" in v for v in report["agent_verdict"]["fatal_violations"]))
         self.assertEqual(report["dimensions"]["4_script_coverage"]["script_take_collision_count"], 1)
 
+    def test_composite_prefix_occlusion_keeps_missing_prefix_while_full_retake_wins(self):
+        """Verify Partial Tail Pick-Up keeps Take 1's opening prefix while Full Retake drops Take 1 completely."""
+        script_text = "今天我們來深入探討核心系統的效能與延遲表現非常出色。"
+        whisper_units = [
+            {
+                "id": 1,
+                "start": 10.0,
+                "end": 14.0,
+                "text": "今天我們來深入探討核心系統的效能",
+                "words": [
+                    {"word": "今天我們來深入探討", "start": 10.0, "end": 12.1},
+                    {"word": "核心系統的效能", "start": 12.2, "end": 14.0},
+                ],
+            },
+            {
+                "id": 2,
+                "start": 15.0,
+                "end": 19.5,
+                "text": "核心系統的效能與延遲表現非常出色。",
+                "words": [
+                    {"word": "核心系統的效能", "start": 15.0, "end": 16.8},
+                    {"word": "與延遲表現非常出色。", "start": 16.8, "end": 19.5},
+                ],
+            },
+        ]
+        partial_pickup_clips = [
+            {
+                "clip_id": 1,
+                "topic": "Opening Attempt",
+                "sentence_ids": [1],
+                "source_in": 10.0,
+                "source_out": 14.0,
+                "transcript": "今天我們來深入探討核心系統的效能",
+            },
+            {
+                "clip_id": 2,
+                "topic": "Tail Pick-up",
+                "sentence_ids": [2],
+                "source_in": 15.0,
+                "source_out": 19.5,
+                "transcript": "核心系統的效能與延遲表現非常出色。",
+            },
+        ]
+        deduped = deduplicate_and_sort_clips(partial_pickup_clips, whisper_units, script_text=script_text)
+        self.assertEqual(len(deduped), 2)
+        self.assertEqual(deduped[0]["composite_role"], "prefix")
+        self.assertEqual(deduped[0]["transcript"], "今天我們來深入探討")
+        self.assertEqual(deduped[1]["composite_role"], "continuation")
+        self.assertTrue(deduped[1]["is_composite_splice"])
+
+        # Audit should pass with 0 script take collisions and 1 composite splice
+        refined = [
+            {
+                "clip_id": 1,
+                "topic": "Prefix",
+                "sentence_ids": [1],
+                "t_first": 10.0,
+                "t_last": 12.1,
+                "source_in": 9.92,
+                "source_out": 12.14,
+                "duration": 2.22,
+                "cps": 4.05,
+                "in_margin": 0.08,
+                "out_margin": 0.04,
+                "transcript": "今天我們來深入探討",
+                "whisper_transcript": "今天我們來深入探討",
+                "composite_role": "prefix",
+                "is_composite_splice": False,
+                "trimmed_tail": True,
+            },
+            {
+                "clip_id": 2,
+                "topic": "Continuation",
+                "sentence_ids": [2],
+                "t_first": 15.0,
+                "t_last": 19.5,
+                "source_in": 14.96,
+                "source_out": 19.60,
+                "duration": 4.64,
+                "cps": 3.45,
+                "in_margin": 0.04,
+                "out_margin": 0.10,
+                "transcript": "核心系統的效能與延遲表現非常出色。",
+                "whisper_transcript": "核心系統的效能與延遲表現非常出色。",
+                "composite_role": "continuation",
+                "is_composite_splice": True,
+            },
+        ]
+        report = audit_edl_quality(
+            refined_edl=refined,
+            whisper_units=whisper_units,
+            total_dur=30.0,
+            video_path=Path("/tmp/raw_footage.mp4"),
+            script_text=script_text,
+            asr_engine="whisper",
+            language="zh-TW",
+            whisper_model="small",
+            punch_in_composite=True,
+        )
+        self.assertTrue(report["agent_verdict"]["pass_quality_gate"])
+        self.assertEqual(report["dimensions"]["4_script_coverage"]["script_take_collision_count"], 0)
+        self.assertEqual(report["summary"]["composite_splices_count"], 1)
+
+    def test_detect_micro_window_anomalies_flags_partial_script_block_backfill(self):
+        """Flag PARTIAL_SCRIPT_BLOCK_BACKFILL when only a tail pick-up was selected and an earlier take has the missing opening."""
+        from scripts.edl_auditor import detect_micro_window_anomalies
+
+        script_text = "今天我們來深入探討整個分散式儲存架構的核心設計理念與容錯機制。"
+        whisper_units = [
+            {"id": 1, "start": 10.0, "end": 14.5, "text": "今天我們來深入探討整個分散式儲存架構"},
+            {"id": 2, "start": 16.0, "end": 20.5, "text": "整個分散式儲存架構的核心設計理念與容錯機制。"},
+        ]
+        clips = [
+            {
+                "clip_id": 1,
+                "topic": "Tail Only",
+                "sentence_ids": [2],
+                "source_in": 16.0,
+                "source_out": 20.5,
+                "transcript": "整個分散式儲存架構的核心設計理念與容錯機制。",
+            }
+        ]
+        anomalies = detect_micro_window_anomalies({"final_edl": clips}, whisper_units, total_dur=30.0, script_text=script_text)
+        self.assertTrue(any(a["type"] == "PARTIAL_SCRIPT_BLOCK_BACKFILL" for a in anomalies))
+
+    def test_sanitize_refined_edl_respects_next_word_hard_wall_and_preserves_composite_splices(self):
+        """Ensure plosive tail restoration never crosses next_word_hard_wall and micro-clip merge skips composite seams."""
+        raw_refined = [
+            {
+                "clip_id": 1,
+                "topic": "Prefix",
+                "sentence_ids": [1],
+                "t_first": 5.000,
+                "t_last": 6.100,
+                "source_in": 4.920,
+                "source_out": 6.080,  # slightly before t_last, with hard wall at 6.115
+                "duration": 1.160,
+                "transcript": "今天我們介紹",
+                "composite_role": "prefix",
+                "trimmed_tail": True,
+                "next_word_hard_wall": 6.115,
+            },
+            {
+                "clip_id": 2,
+                "topic": "Short Continuation",
+                "sentence_ids": [1],
+                "t_first": 6.300,
+                "t_last": 6.680,
+                "source_in": 6.260,
+                "source_out": 6.700,  # 0.44s (< 0.45s), gap 0.145s (< 0.35s), but marked as composite splice
+                "duration": 0.440,
+                "transcript": "核心架構",
+                "composite_role": "continuation",
+                "is_composite_splice": True,
+            },
+        ]
+        sanitized, stats = sanitize_refined_edl(raw_refined, total_dur=20.0)
+        self.assertEqual(len(sanitized), 2)
+        self.assertLessEqual(sanitized[0]["source_out"], 6.115)
+        self.assertEqual(stats["micro_clips_merged"], 0)
+
+    def test_script_whitelisted_phrase_and_mid_sentence_echo_never_trigger_false_tail_head_retake(self):
+        """Ensure repeated script terms or mid-sentence echoes (longest.b > 6) are neither truncated nor flagged."""
+        script_text = (
+            "波束成形技術會把無線能量精準送到裝置。\n"
+            "這種為了讓連線更穩的設計把訊號精準送到裝置，卻也留下了反射特徵。\n"
+        )
+        whisper_units = [
+            {"id": 5, "start": 20.0, "end": 25.0, "text": "波束成形技術會把無線能量精準送到裝置", "is_target_speaker": True},
+            {
+                "id": 6,
+                "start": 25.5,
+                "end": 32.0,
+                "text": "這種為了讓連線更穩的設計把訊號精準送到裝置卻也留下了反射特徵",
+                "is_target_speaker": True,
+            },
+        ]
+        clips = [
+            {
+                "clip_id": 1,
+                "topic": "Beamforming",
+                "sentence_ids": [5],
+                "source_in": 20.0,
+                "source_out": 25.0,
+                "transcript": "波束成形技術會把無線能量精準送到裝置。",
+            },
+            {
+                "clip_id": 2,
+                "topic": "Reflection",
+                "sentence_ids": [6],
+                "source_in": 25.5,
+                "source_out": 32.0,
+                "transcript": "這種為了讓連線更穩的設計把訊號精準送到裝置，卻也留下了反射特徵。",
+            },
+        ]
+        deduped = deduplicate_and_sort_clips(clips, whisper_units, script_text=script_text)
+        self.assertEqual(len(deduped), 2)
+        self.assertIn("精準送到裝置", deduped[0]["transcript"])
+        self.assertFalse(deduped[0].get("trimmed_tail", False))
+
+        anomalies = detect_micro_window_anomalies({"final_edl": deduped}, whisper_units, total_dur=40.0, script_text=script_text)
+        self.assertEqual(anomalies, [])
+
+        refined = [
+            dict(deduped[0], t_first=20.0, t_last=25.0, duration=5.0, cps=3.8, in_margin=0.08, out_margin=0.10),
+            dict(deduped[1], t_first=25.5, t_last=32.0, duration=6.5, cps=4.6, in_margin=0.08, out_margin=0.10),
+        ]
+        report = audit_edl_quality(
+            refined_edl=refined,
+            whisper_units=whisper_units,
+            total_dur=40.0,
+            video_path=Path("/tmp/raw_footage.mp4"),
+            script_text=script_text,
+        )
+        self.assertTrue(report["agent_verdict"]["pass_quality_gate"])
+
+    def test_composite_prefix_occlusion_extends_pre_overlap_subject_and_preserves_continuation_head(self):
+        """Trim dangling pre-overlap subject on composite prefix when continuation restarts with fuzzy subject + verb."""
+        whisper_units = [
+            {"id": 15, "start": 40.0, "end": 46.0, "text": "取得原始數據之後研究團隊將信號轉換", "is_target_speaker": True},
+            {"id": 16, "start": 46.8, "end": 53.0, "text": "研究團隊把信號轉換成高解析度頻譜圖", "is_target_speaker": True},
+        ]
+        clips = [
+            {
+                "clip_id": 1,
+                "topic": "Data",
+                "sentence_ids": [15],
+                "source_in": 40.0,
+                "source_out": 46.0,
+                "composite_role": "prefix",
+                "transcript": "取得原始數據之後，研究團隊將信號轉換",
+            },
+            {
+                "clip_id": 2,
+                "topic": "Spectrogram",
+                "sentence_ids": [16],
+                "source_in": 46.8,
+                "source_out": 53.0,
+                "composite_role": "continuation",
+                "is_composite_splice": True,
+                "transcript": "研究團隊把信號轉換成高解析度頻譜圖。",
+            },
+        ]
+        deduped = deduplicate_and_sort_clips(clips, whisper_units)
+        self.assertEqual(len(deduped), 2)
+        self.assertEqual(deduped[0]["transcript"], "取得原始數據之後")
+        self.assertNotIn("研究團隊", deduped[0]["transcript"])
+        self.assertFalse(deduped[1]["trimmed_head"])
+
+    def test_deduplicate_preserves_parallelism_and_llm_verified_window_downgrades_audit_to_warning(self):
+        """Do not blindly delete non-overlapping parallel clips in Python; honor llm_verified_window in audit."""
+        whisper_units = [
+            {"id": 1, "start": 10.0, "end": 15.0, "text": "我們可以看到第一組實驗數據表現非常穩定", "is_target_speaker": True},
+            {"id": 2, "start": 15.6, "end": 21.0, "text": "我們可以看到第二組實驗數據同樣非常出色", "is_target_speaker": True},
+        ]
+        initial_edl = {
+            "final_edl": [
+                {"clip_id": 1, "topic": "Group 1", "sentence_ids": [1], "source_in": 10.0, "source_out": 15.0, "transcript": "我們可以看到第一組實驗數據表現非常穩定"},
+                {"clip_id": 2, "topic": "Group 2", "sentence_ids": [2], "source_in": 15.6, "source_out": 21.0, "transcript": "我們可以看到第二組實驗數據同樣非常出色"},
+            ]
+        }
+
+        # Gemini micro-window review listens to audio and intentionally retains both parallel sentences
+        def _keep_both_parallel(win_units, win_start, win_end, start_offset, end_offset, anomaly):
+            return {"final_edl": initial_edl["final_edl"]}
+
+        repaired_edl, repairs = repair_edl_micro_windows(
+            model_edl=initial_edl,
+            whisper_units=whisper_units,
+            total_dur=30.0,
+            run_window_inference_fn=_keep_both_parallel,
+        )
+        self.assertEqual(len(repairs), 1)
+        self.assertEqual(len(repaired_edl["final_edl"]), 2)
+        self.assertTrue(all(c.get("llm_verified_window") for c in repaired_edl["final_edl"]))
+
+        refined = [
+            dict(repaired_edl["final_edl"][0], t_first=10.0, t_last=15.0, duration=5.0, cps=3.8, in_margin=0.08, out_margin=0.10),
+            dict(repaired_edl["final_edl"][1], t_first=15.6, t_last=21.0, duration=5.4, cps=3.5, in_margin=0.08, out_margin=0.10),
+        ]
+        report = audit_edl_quality(
+            refined_edl=refined,
+            whisper_units=whisper_units,
+            total_dur=30.0,
+            video_path=Path("/tmp/raw_footage.mp4"),
+        )
+        self.assertTrue(report["agent_verdict"]["pass_quality_gate"])
+        self.assertEqual(report["agent_verdict"]["fatal_violations"], [])
+        self.assertTrue(any("LLM-verified window" in w for w in report["agent_verdict"]["warnings"]))
+
+    def test_detect_micro_window_anomalies_coalesces_overlapping_multi_clip_defects(self):
+        """Merge overlapping adjacent anomalies and punctuated intra-clip stutters into a single unified window."""
+        whisper_units = [
+            {"id": 14, "start": 80.0, "end": 85.0, "text": "前段結論非常明確因為系統架構", "is_target_speaker": True},
+            {"id": 15, "start": 85.4, "end": 92.0, "text": "因為啊，因為系統架構已經完成模組化設計並將訊號轉換", "is_target_speaker": True},
+            {"id": 16, "start": 92.5, "end": 98.0, "text": "將訊號轉換成標準向量格式輸出", "is_target_speaker": True},
+        ]
+        model_edl = {
+            "final_edl": [
+                {"clip_id": 1, "topic": "A", "sentence_ids": [14], "source_in": 80.0, "source_out": 85.0, "transcript": "前段結論非常明確因為系統架構"},
+                {"clip_id": 2, "topic": "B", "sentence_ids": [15], "source_in": 85.4, "source_out": 92.0, "transcript": "因為啊，因為系統架構已經完成模組化設計並將訊號轉換"},
+                {"clip_id": 3, "topic": "C", "sentence_ids": [16], "source_in": 92.5, "source_out": 98.0, "transcript": "將訊號轉換成標準向量格式輸出"},
+            ]
+        }
+        anomalies = detect_micro_window_anomalies(model_edl, whisper_units, total_dur=120.0)
+        self.assertEqual(len(anomalies), 1)
+        self.assertEqual(anomalies[0]["replace_range"], (0, 3))
+        self.assertIn("TAIL_HEAD_RETAKE", anomalies[0]["sub_types"])
+        self.assertIn("INTRA_CLIP_REPEAT", anomalies[0]["sub_types"])
