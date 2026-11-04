@@ -37,7 +37,10 @@ video-trimmer/
 │       │   ├── chirp3_asr.py         # Cloud Speech-to-Text V2 (Chirp 3) word-timestamp engine
 │       │   ├── acoustic.py           # CPS, onset clamping, overlap pivots, gain matching & speech bounds
 │       │   ├── transcribe.py         # Dual-engine ASR, CJK intra-token slicing & sub-unit resolution
-│       │   ├── edl_auditor.py        # Right-to-Left Span Occlusion, micro-window repair & 8D audit
+│       │   ├── script_aligner.py     # Script block parser, text normalization & coverage scoring
+│       │   ├── edl_occlusion.py      # Right-to-Left Span Occlusion, short-clause recovery & deduplication
+│       │   ├── edl_repair.py         # Closed-loop anomaly detection & micro-window rescan repair
+│       │   ├── edl_auditor.py        # Monotonic timeline sanitization & 8-dimension quality audit
 │       │   ├── gemini_client.py      # Vertex AI (ADC) client & multimodal inference
 │       │   ├── gcs_utils.py          # Google Cloud Storage upload & ephemeral cleanup
 │       │   ├── exporters.py          # FCP7 XML / FCPXML v1.9 / CSV generation with composite markers
@@ -77,7 +80,7 @@ video-trimmer/
    - Clamps inflated post-pause word starts (`clamp_post_pause_word_onset`), snaps cut-ins before vocal cord vibration, applies compact `40ms` margins on composite seams, and enforces `next_word_hard_wall` locks so excised stumbles never bleed into retained audio.
 6. **Composite Loudness Gain Matching, 20ms Micro-Crossfades, & Optional `1.12x` Punch-In**:
    - Matches voiced RMS loudness across composite pick-up seams (`compute_composite_gain_db`), applies 20ms `afade` equal-power micro-fades (`iqsin`/`qsin`), and optionally applies an even-pixel `1.12x` framing punch-in (`--punch-in-composite`) in both MP4 renders and NLE timelines.
-7. **Closed-Loop Post-Alignment Verification, Micro-Window Repair, & 8-Dimension Quality Audit (`edl_auditor.py`)**:
+7. **Closed-Loop Post-Alignment Verification, Micro-Window Repair, & 8-Dimension Quality Audit (`edl_repair.py` / `edl_auditor.py`)**:
    - Verifies physical word-aligned `asr_transcript` before deleting staged GCS media, detecting missing script blocks, partial backfills (`PARTIAL_SCRIPT_BLOCK_BACKFILL`), duplicate script clauses (`SCRIPT_PHRASE_MULTIPLICITY`), unscripted extraneous spans (`UNSCRIPTED_EXTRANEOUS_SPAN`), unanchored clips, and retake collisions, then re-scanning only the affected `15s–90s` slice via `VideoMetadata(start_offset=..., end_offset=...)`.
    - Outputs `<base>_<tag>_edl_report.md` and `<base>_<tag>_edl_report.json` with `1_acoustic_lock` and a top-level `agent_verdict`.
 8. **Universal NLE Project Export with Composite Markers**:

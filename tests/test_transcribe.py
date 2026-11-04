@@ -1,9 +1,7 @@
 import unittest
 
-from scripts.transcribe import (
-    merge_whisper_segments_to_sentences,
-    normalize_text,
-)
+from scripts.script_aligner import normalize_text
+from scripts.transcribe import merge_whisper_segments_to_sentences
 
 
 def _seg(id_, start, end, text, words=None):

@@ -39,7 +39,7 @@ flowchart TD
         W_ASR --> S_SEG --> W_JSON
     end
 
-    subgraph L2["Layer 2: 双模式 LLM 语义择优与跨镜复合遮罩 (gemini_client / edl_auditor)"]
+    subgraph L2["Layer 2: 双模式 LLM 语义择优与跨镜复合遮罩 (gemini_client / script_aligner / edl_occlusion / edl_repair)"]
         MODE["Vertex AI Gemini 3.8 Flash 多模态视频理解<br/>• Mode A: 有讲稿单调锚定 [Script Block 01..NN]<br/>• Mode B: 无讲稿意图视窗仲裁 (剔除残句/保护排比)"]:::stage2Style
         REPAIR["局部微视窗重扫 & 由右至左跨镜区间遮罩<br/>(完整重念: Last-Take-Wins | 局部补录后半: 回补前缀 >=0.55s)"]:::stage2Style
         MODE --> REPAIR
@@ -81,12 +81,12 @@ flowchart TD
    - **默认云端引擎 (`--asr-engine chirp3`)**：采用 Google Cloud Speech-to-Text V2 `chirp_3`（`STT_LOCATION=us`，启用 `enableWordTimeOffsets=True` 与自动标点），提取 `0.001s` 毫秒级逐词时间戳，支持 18 分钟长音频自动分块（5 秒重叠窗口）；遇到云端认证或权限错误时严格执行 Fail-Fast 终止，绝不静默降级为 Whisper。
    - **可选本地引擎 (`--asr-engine whisper`)**：在用户明确指定本地转录时，支持 `mlx-whisper`（Apple Silicon Metal）或 `faster-whisper`。
    - 仅依据物理边界切分 `Sentence ID`：换气停顿（`gap >= 0.20s` 及中日韩多字词自然换气 `>= 0.35s`）、吃螺丝拉长音起音（`word_dur >= 1.20s`）、句尾标点与说话人轮替，绝不在 Python 中使用字符串相似度猜测 NG 重录。
-2. **第二层：双模式 LLM 语义择优、相邻短子句自动补齐与闭环微视窗修复 (`gemini_client.py` / `edl_auditor.py`)**：
-   - **结构化输出约束 (`EDL_RESPONSE_SCHEMA`)**：强制 Gemini 输出单调连续的物理 `Sentence ID` 范围，并支持**相邻短子句自动补齐**（`_extend_omitted_adjacent_short_clauses`），自动找回模型在 `transcript` 中已保留但漏选 `Sentence ID` 的开头或结尾短子句。
-   - **Mode A：有讲稿单调锚定模式（提供拍摄讲稿时）**：通过单一真相来源（SSOT）解析器（`extract_script_blocks`）自动过滤 YAML Frontmatter、舞台指示与非口播元数据行，将口播台词格式化为 `[Script Block 01] .. [Script Block NN]`。整句重念时严格维持 `Last-Take-Wins`。
+2. **第二层：双模式 LLM 语义择优、相邻短子句自动补齐与闭环微视窗修复 (`gemini_client.py` / `script_aligner.py` / `edl_occlusion.py` / `edl_repair.py`)**：
+   - **结构化输出约束 (`EDL_RESPONSE_SCHEMA`)**：强制 Gemini 输出单调连续的物理 `Sentence ID` 范围，并支持**相邻短子句自动补齐**（`edl_occlusion.py` 中的 `_extend_omitted_adjacent_short_clauses`），自动找回模型在 `transcript` 中已保留但漏选 `Sentence ID` 的开头或结尾短子句。
+   - **Mode A：有讲稿单调锚定模式（提供拍摄讲稿时）**：通过单一真相来源（SSOT）解析器（`script_aligner.py` 中的 `extract_script_blocks`）自动过滤 YAML Frontmatter、舞台指示与非口播元数据行，将口播台词格式化为 `[Script Block 01] .. [Script Block NN]`。整句重念时严格维持 `Last-Take-Wins`。
    - **Mode B：无讲稿意图视窗仲裁模式（未提供讲稿时）**：剔除未完成残句重录（Abandoned Fragment），同时保护刻意修辞排比强调。
-   - **由右至左跨镜区间遮罩 (`resolve_composite_prefix_occlusions`)**：当讲者仅局部补录后半句（`Take 1: A + B1 + C_ng`、`Take 2: B2 + C_ok`）时，以最新 `Take 2`（`composite_role="continuation"`）为基准，仅从上一镜 `Take 1` 回补未被覆盖的前缀 `A`（`composite_role="prefix"`，须满足 `is_viable_sub_span` 时长 `>= 0.55s`）。
-   - **对齐后闭环验证与局部微视窗重扫 (`edl_auditor.py`)**：在清理 GCS 暂存视频前执行物理逐词对齐闭环检查，精准检测遗漏段落、半句缺漏（`PARTIAL_SCRIPT_BLOCK_BACKFILL`）、讲稿子句多重残留（`SCRIPT_PHRASE_MULTIPLICITY`，支持讲稿合法重复白名单）、物理 ASR 废词渗漏（`UNSCRIPTED_EXTRANEOUS_SPAN`）、跨片段句尾重讲（`TAIL_HEAD_RETAKE`）、单一片段内部重复（`INTRA_CLIP_REPEAT`）与多 Take 冲突（`SCRIPT_TAKE_COLLISION`），仅重扫该 `15s–90s` 局部视频视窗。
+   - **由右至左跨镜区间遮罩 (`edl_occlusion.py` 中的 `resolve_composite_prefix_occlusions`)**：当讲者仅局部补录后半句（`Take 1: A + B1 + C_ng`、`Take 2: B2 + C_ok`）时，以最新 `Take 2`（`composite_role="continuation"`）为基准，仅从上一镜 `Take 1` 回补未被覆盖的前缀 `A`（`composite_role="prefix"`，须满足 `is_viable_sub_span` 时长 `>= 0.55s`）。
+   - **对齐后闭环验证与局部微视窗重扫 (`edl_repair.py`)**：在清理 GCS 暂存视频前执行物理逐词对齐闭环检查，精准检测遗漏段落、半句缺漏（`PARTIAL_SCRIPT_BLOCK_BACKFILL`）、讲稿子句多重残留（`SCRIPT_PHRASE_MULTIPLICITY`，支持讲稿合法重复白名单）、物理 ASR 废词渗漏（`UNSCRIPTED_EXTRANEOUS_SPAN`）、跨片段句尾重讲（`TAIL_HEAD_RETAKE`）、单一片段内部重复（`INTRA_CLIP_REPEAT`）与多 Take 冲突（`SCRIPT_TAKE_COLLISION`），仅重扫该 `15s–90s` 局部视频视窗。
 3. **第三层：句中口误双区间挖除、多字词比例切分与邻词硬墙钳制 (`transcribe.py`)**：
    - 支持**句中口误挖除**（`_extract_matched_word_spans_by_transcript`），将 `[A + B_ng + B_ok + C]` 拆解为 `[A]` 与 `[B_ok + C]` 两个干净子单元；对中日韩多字词按字符比例插值（`_slice_words_on_char_span`），并对相邻未选废词施加 `0.001s` 硬墙钳制（`next_word_hard_wall` / `prev_word_hard_wall`）。
 4. **第四层：跨片段连贯小句无缝合一 (`coalesce_adjacent_sub_units`)**：

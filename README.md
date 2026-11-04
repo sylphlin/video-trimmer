@@ -39,7 +39,7 @@ flowchart TD
         W_ASR --> S_SEG --> W_JSON
     end
 
-    subgraph L2["Layer 2: Dual-Mode LLM Arbitration & Composite Span Occlusion (gemini_client / edl_auditor)"]
+    subgraph L2["Layer 2: Dual-Mode LLM Arbitration & Composite Span Occlusion (gemini_client / script_aligner / edl_occlusion / edl_repair)"]
         MODE["Vertex AI Gemini 3.8 Flash Multimodal Video Scan<br/>• Mode A: Script-Anchored Alignment [Script Block 01..NN]<br/>• Mode B: Unscripted Intent-Window Arbitration"]:::stage2Style
         REPAIR["Micro-Window Rescan & Right-to-Left Span Occlusion<br/>(Full Restart: Last-Take-Wins | Partial Pick-Up: Prefix Backfill >=0.55s)"]:::stage2Style
         MODE --> REPAIR
@@ -81,12 +81,12 @@ flowchart TD
    - **Default Engine (`--asr-engine chirp3`)**: Uses Google Cloud Speech-to-Text V2 `chirp_3` (`STT_LOCATION=us`, `enableWordTimeOffsets=True`, `enableAutomaticPunctuation=True`) to extract `0.001 s` word timestamps with automatic 18-minute chunking (5-second overlap) and 1-to-1 Simplified-to-Traditional character normalization for `zh-TW`. Enforces strict Fail-Fast on cloud or authentication errors without silent fallback to Whisper.
    - **Optional Local Engine (`--asr-engine whisper`)**: Supports offline transcription via `mlx-whisper` (Apple Silicon Metal) or `faster-whisper` (CPU/CUDA) when requested by the user.
    - Splits `Sentence ID` units strictly on physical and universal punctuation boundaries: breath pauses (`gap >= 0.20 s`, comma-absorbed pauses `>= 0.22 s`, micro-paused clause commas `>= 0.18 s`, and multi-character CJK breath splits `>= 0.35 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), closure punctuation, and speaker turns, without language-specific conjunction or filler word lists. Python never guesses semantic retakes via string similarity.
-2. **Layer 2 — Dual-Mode LLM Take Arbitration, Adjacent Short-Clause Recovery, & Closed-Loop Micro-Window Repair (`gemini_client.py` / `edl_auditor.py`)**:
-   - **Structured Schema & Adjacent Short-Clause Auto-Extension**: Enforces `EDL_RESPONSE_SCHEMA` with contiguous physical `Sentence ID` ranges per clip, and auto-extends `sentence_ids` when an unclaimed adjacent opening or closing short clause is explicitly present in `transcript` (`_extend_omitted_adjacent_short_clauses`).
-   - **Mode A: Monotonic Script-Anchored Alignment (With Shooting Script)**: Strips YAML frontmatter, stage directions, and metadata headers via `extract_script_blocks` (`[Script Block 01] .. [Script Block NN]`). Enforces `Last-Take-Wins` when the speaker restarts a block from the beginning.
+2. **Layer 2 — Dual-Mode LLM Take Arbitration, Adjacent Short-Clause Recovery, & Closed-Loop Micro-Window Repair (`gemini_client.py` / `script_aligner.py` / `edl_occlusion.py` / `edl_repair.py`)**:
+   - **Structured Schema & Adjacent Short-Clause Auto-Extension**: Enforces `EDL_RESPONSE_SCHEMA` with contiguous physical `Sentence ID` ranges per clip, and auto-extends `sentence_ids` when an unclaimed adjacent opening or closing short clause is explicitly present in `transcript` (`_extend_omitted_adjacent_short_clauses` in `edl_occlusion.py`).
+   - **Mode A: Monotonic Script-Anchored Alignment (With Shooting Script)**: Strips YAML frontmatter, stage directions, and metadata headers via `extract_script_blocks` (`script_aligner.py`, `[Script Block 01] .. [Script Block NN]`). Enforces `Last-Take-Wins` when the speaker restarts a block from the beginning.
    - **Mode B: Unscripted Intent-Window Arbitration (Without Script)**: Prunes abandoned fragments and false starts while preserving intentional rhetorical repetition.
-   - **Last-Take-Anchored Right-to-Left Span Occlusion (`resolve_composite_prefix_occlusions`)**: When the speaker performs a partial tail pick-up (`Take 1: A + B1 + C_ng`, `Take 2: B2 + C_ok`), anchors on `Take 2` (`composite_role="continuation"`) and backfills only the non-occluded prefix `A` (`composite_role="prefix"`) from `Take 1` if `A` meets the script-neutral viability threshold (`is_viable_sub_span`, duration `>= 0.55 s`).
-   - **Closed-Loop Post-Alignment Verification & Micro-Window Repair (`edl_auditor.py`)**: Verifies physical word-aligned `asr_transcript` before deleting staged GCS media. Detects missing blocks, partial block coverage (`PARTIAL_SCRIPT_BLOCK_BACKFILL`), duplicate script clauses (`SCRIPT_PHRASE_MULTIPLICITY` with legitimate script repetition whitelisting), unscripted extraneous spans (`UNSCRIPTED_EXTRANEOUS_SPAN`), tail-to-head retakes (`TAIL_HEAD_RETAKE`), intra-clip repeats (`INTRA_CLIP_REPEAT`), and multi-take collisions (`SCRIPT_TAKE_COLLISION`), then re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata`.
+   - **Last-Take-Anchored Right-to-Left Span Occlusion (`resolve_composite_prefix_occlusions` in `edl_occlusion.py`)**: When the speaker performs a partial tail pick-up (`Take 1: A + B1 + C_ng`, `Take 2: B2 + C_ok`), anchors on `Take 2` (`composite_role="continuation"`) and backfills only the non-occluded prefix `A` (`composite_role="prefix"`) from `Take 1` if `A` meets the script-neutral viability threshold (`is_viable_sub_span`, duration `>= 0.55 s`).
+   - **Closed-Loop Post-Alignment Verification & Micro-Window Repair (`edl_repair.py`)**: Verifies physical word-aligned `asr_transcript` before deleting staged GCS media. Detects missing blocks, partial block coverage (`PARTIAL_SCRIPT_BLOCK_BACKFILL`), duplicate script clauses (`SCRIPT_PHRASE_MULTIPLICITY` with legitimate script repetition whitelisting), unscripted extraneous spans (`UNSCRIPTED_EXTRANEOUS_SPAN`), tail-to-head retakes (`TAIL_HEAD_RETAKE`), intra-clip repeats (`INTRA_CLIP_REPEAT`), and multi-take collisions (`SCRIPT_TAKE_COLLISION`), then re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata`.
 3. **Layer 3 — Two-Span Stumble Excision, CJK Proportional Slicing, & Hard-Wall Clamping (`transcribe.py`)**:
    - Supports **Intra-Sentence Mid-Span Excision** (`_extract_matched_word_spans_by_transcript`), splitting `[A + B_ng + B_ok + C]` into clean sub-units `[A]` and `[B_ok + C]` around mid-sentence stumbles.
    - Interpolates multi-character CJK word tokens proportionally (`_slice_words_on_char_span`) and clamps internal cuts `0.001 s` away from adjacent unselected words (`next_word_hard_wall` / `prev_word_hard_wall`) to prevent ghost syllables.
@@ -135,7 +135,10 @@ video-trimmer/
 │       │   ├── chirp3_asr.py                # Google Cloud STT V2 Chirp 3 word-level ASR (0.001s precision)
 │       │   ├── acoustic.py                  # Onset snapping, overlap pivot sync, and RMS gain matching
 │       │   ├── transcribe.py                # Dual-engine segmentation, CJK slicing, and two-span excision
-│       │   ├── edl_auditor.py               # Span occlusion, micro-window repair, sanitizer, and 8-D audit
+│       │   ├── script_aligner.py            # Script block parser, text normalizer, and coverage scorer
+│       │   ├── edl_occlusion.py             # Span occlusion, short-clause recovery, and clip deduplication
+│       │   ├── edl_repair.py                # Closed-loop anomaly detector and micro-window rescan repair
+│       │   ├── edl_auditor.py               # Monotonic timeline sanitizer and 8-dimension quality auditor
 │       │   ├── gemini_client.py             # Vertex AI (ADC) client and dual-mode prompt builder
 │       │   ├── gcs_utils.py                 # Cloud Storage staging, Google Drive cache, and CJK recovery
 │       │   ├── exporters.py                 # FCP7 XML, FCPXML v1.9, and CSV exporters with splice markers

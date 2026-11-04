@@ -26,6 +26,7 @@ from .constants import (
     DEFAULT_WHISPER_MODEL,
 )
 from .exceptions import VideoTrimmerError
+from .script_aligner import extract_script_blocks, normalize_text
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +43,6 @@ except ImportError:
     HAS_FASTER_WHISPER = False
 
 HAS_WHISPER = HAS_MLX_WHISPER or HAS_FASTER_WHISPER
-
-
-def normalize_text(text):
-    """Strip punctuation and whitespace, and convert text to lowercase for alignment."""
-    return re.sub(r'[^\w一-鿿]', '', text).lower()
 
 
 def _compute_sentence_speaker(sentence):
@@ -1837,8 +1833,6 @@ def calculate_active_script_window(
     """
     if not whisper_units or not script_text or not script_text.strip():
         return 0.0, total_duration, whisper_units
-
-    from .edl_auditor import extract_script_blocks
 
     blocks = extract_script_blocks(script_text)
     script_clauses = []

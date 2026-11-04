@@ -1,20 +1,29 @@
-"""Unit tests for edl_auditor.py (pre-render micro-window repair, timing sanitizer, and 8-dimension audit)."""
+"""Unit tests for script_aligner.py, edl_occlusion.py, edl_repair.py, and edl_auditor.py."""
 
 import tempfile
 import unittest
 from pathlib import Path
 
 from scripts.edl_auditor import (
-    _script_block_coverage_score,
     audit_edl_quality,
-    deduplicate_and_sort_clips,
-    detect_micro_window_anomalies,
-    extract_script_blocks,
     generate_edl_audit_markdown,
-    repair_edl_micro_windows,
     sanitize_refined_edl,
 )
+from scripts.edl_occlusion import (
+    _detect_tail_head_overlap,
+    _is_opening_retake_pair,
+    deduplicate_and_sort_clips,
+    occlude_expanded_sub_units,
+)
+from scripts.edl_repair import (
+    detect_micro_window_anomalies,
+    repair_edl_micro_windows,
+)
 from scripts.gemini_client import format_script_blocks_for_prompt
+from scripts.script_aligner import (
+    _script_block_coverage_score,
+    extract_script_blocks,
+)
 
 
 def _sample_whisper_units():
@@ -627,8 +636,6 @@ class TestAuditEdlQuality(unittest.TestCase):
 
     def test_detect_micro_window_anomalies_flags_partial_script_block_backfill(self):
         """Flag PARTIAL_SCRIPT_BLOCK_BACKFILL when only a tail pick-up was selected and an earlier take has the missing opening."""
-        from scripts.edl_auditor import detect_micro_window_anomalies
-
         script_text = "今天我們來深入探討整個分散式儲存架構的核心設計理念與容錯機制。"
         whisper_units = [
             {"id": 1, "start": 10.0, "end": 14.5, "text": "今天我們來深入探討整個分散式儲存架構"},
@@ -834,8 +841,6 @@ class TestAuditEdlQuality(unittest.TestCase):
 
     def test_directional_opening_retake_preserves_long_prefix_before_tail_head_restart(self):
         """Treat A+B followed by B+C as a tail-head overlap rather than deleting A+B as an opening retake."""
-        from scripts.edl_auditor import _detect_tail_head_overlap, _is_opening_retake_pair
-
         text_prev = "每個人的步行姿態與骨架大小都會在空間中擾動無線電波，當空間裡的設備不斷回報通道摘要時就會留下特徵。"
         text_next = "當空間裡的設備不斷回報通道摘要，你的動作就會被記錄成專屬特徵向量。"
         self.assertFalse(_is_opening_retake_pair(text_prev, text_next))
@@ -845,8 +850,6 @@ class TestAuditEdlQuality(unittest.TestCase):
 
     def test_occlude_expanded_sub_units_drops_opening_retakes_and_slices_multichar_tail_head_overlap(self):
         """Drop expanded opening-retake sub-units and slice multi-char CJK words on tail-head overlap."""
-        from scripts.edl_auditor import occlude_expanded_sub_units
-
         expanded = [
             {
                 "parent_clip": {"clip_id": 1},

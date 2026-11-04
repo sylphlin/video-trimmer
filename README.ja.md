@@ -39,7 +39,7 @@ flowchart TD
         W_ASR --> S_SEG --> W_JSON
     end
 
-    subgraph L2["Layer 2: デュアルモード LLM 調停＆複合スパン遮蔽 (gemini_client / edl_auditor)"]
+    subgraph L2["Layer 2: デュアルモード LLM 調停＆複合スパン遮蔽 (gemini_client / script_aligner / edl_occlusion / edl_repair)"]
         MODE["Vertex AI Gemini 3.8 Flash マルチモーダル動画理解<br/>• Mode A: 台本アンカー単調アライメント [Script Block 01..NN]<br/>• Mode B: 台本なしインテントウィンドウ調停"]:::stage2Style
         REPAIR["マイクロウィンドウ再スキャン＆右から左へのスパン遮蔽<br/>(全文言い直し: Last-Take-Wins | 後半のみ録り直し: 先頭補完 >=0.55s)"]:::stage2Style
         MODE --> REPAIR
@@ -81,12 +81,12 @@ flowchart TD
    - **標準クラウドエンジン (`--asr-engine chirp3`)**：Google Cloud Speech-to-Text V2 `chirp_3`（`STT_LOCATION=us`、`enableWordTimeOffsets=True`、自動句読点有効）により `0.001s` 精度の単語タイムスタンプを抽出し、18 分チャンク分割（5 秒オーバーラップ）に対応します。認証・権限エラー時は即座に Fail-Fast で終了し、Whisper への暗黙的なフォールバックは行いません。
    - **任意ローカルエンジン (`--asr-engine whisper`)**：ユーザーが明示的にローカル転写を指定した場合のみ、`mlx-whisper` または `faster-whisper` を使用します。
    - 息継ぎ休止（`gap >= 0.20s` および CJK 複数文字トークン間の呼吸休止 `>= 0.35s`）、長音化（`word_dur >= 1.20s`）、句読点、話者交替のみで `Sentence ID` を分割し、Python 側の文字列類似度によるリテイク推測は一切行いません。
-2. **レイヤー 2：デュアルモード LLM テイク選定、隣接短節の自動補完＆閉ループ微細ウィンドウ修復 (`gemini_client.py` / `edl_auditor.py`)**：
-   - **構造化スキーマ制約 (`EDL_RESPONSE_SCHEMA`)**：各クリップに連続した物理 `Sentence ID` 範囲を強制し、`transcript` に含まれている未選択の先頭・末尾短節を自動補完（`_extend_omitted_adjacent_short_clauses`）します。
-   - **Mode A：スクリプトアンカー単調アライメント（台本指定時）**：SSOT パーサー（`extract_script_blocks`）で非発話見出しを除外して `[Script Block 01] .. [Script Block NN]` に整形し、文頭からの言い直しには 100% `Last-Take-Wins` を適用します。
+2. **レイヤー 2：デュアルモード LLM テイク選定、隣接短節の自動補完＆閉ループ微細ウィンドウ修復 (`gemini_client.py` / `script_aligner.py` / `edl_occlusion.py` / `edl_repair.py`)**：
+   - **構造化スキーマ制約 (`EDL_RESPONSE_SCHEMA`)**：各クリップに連続した物理 `Sentence ID` 範囲を強制し、`transcript` に含まれている未選択の先頭・末尾短節を自動補完（`edl_occlusion.py` の `_extend_omitted_adjacent_short_clauses`）します。
+   - **Mode A：スクリプトアンカー単調アライメント（台本指定時）**：SSOT パーサー（`script_aligner.py` の `extract_script_blocks`）で非発話見出しを除外して `[Script Block 01] .. [Script Block NN]` に整形し、文頭からの言い直しには 100% `Last-Take-Wins` を適用します。
    - **Mode B：台本なしインテントウィンドウ調停（台本省略時）**：途中放棄された断片を除去しつつ、意図的な反復強調表現を保護します。
-   - **右から左へのスパン遮蔽 (`resolve_composite_prefix_occlusions`)**：後半のみを録り直したピックアップテイク（`Take 1: A + B1 + C_ng`、`Take 2: B2 + C_ok`）では、最新の `Take 2`（`composite_role="continuation"`）を基準とし、最小独立節条件（`is_viable_sub_span`、長さ `>= 0.55s`）を満たす未遮蔽の先頭部分 `A`（`composite_role="prefix"`）のみを `Take 1` から補完します。
-   - **アライメント後閉ループ検証＆局所マイクロウィンドウ再スキャン (`edl_auditor.py`)**：GCS 上の一時動画を削除する前に物理単語アライメント結果（`asr_transcript`）を閉ループ検証し、欠落ブロック、部分一致ブロック（`PARTIAL_SCRIPT_BLOCK_BACKFILL`）、台本フレーズの重複残存（`SCRIPT_PHRASE_MULTIPLICITY`、正当な台本内反復のホワイトリスト対応）、台本外の不要語残存（`UNSCRIPTED_EXTRANEOUS_SPAN`）、末尾・先頭リテイク（`TAIL_HEAD_RETAKE`）、クリップ内反復（`INTRA_CLIP_REPEAT`）、複数テイク衝突（`SCRIPT_TAKE_COLLISION`）を検出して、該当する `15s–90s` 区間のみを `VideoMetadata` で再スキャンします。
+   - **右から左へのスパン遮蔽 (`edl_occlusion.py` の `resolve_composite_prefix_occlusions`)**：後半のみを録り直したピックアップテイク（`Take 1: A + B1 + C_ng`、`Take 2: B2 + C_ok`）では、最新の `Take 2`（`composite_role="continuation"`）を基準とし、最小独立節条件（`is_viable_sub_span`、長さ `>= 0.55s`）を満たす未遮蔽の先頭部分 `A`（`composite_role="prefix"`）のみを `Take 1` から補完します。
+   - **アライメント後閉ループ検証＆局所マイクロウィンドウ再スキャン (`edl_repair.py`)**：GCS 上の一時動画を削除する前に物理単語アライメント結果（`asr_transcript`）を閉ループ検証し、欠落ブロック、部分一致ブロック（`PARTIAL_SCRIPT_BLOCK_BACKFILL`）、台本フレーズの重複残存（`SCRIPT_PHRASE_MULTIPLICITY`、正当な台本内反復のホワイトリスト対応）、台本外の不要語残存（`UNSCRIPTED_EXTRANEOUS_SPAN`）、末尾・先頭リテイク（`TAIL_HEAD_RETAKE`）、クリップ内反復（`INTRA_CLIP_REPEAT`）、複数テイク衝突（`SCRIPT_TAKE_COLLISION`）を検出して、該当する `15s–90s` 区間のみを `VideoMetadata` で再スキャンします。
 3. **レイヤー 3：文中言い淀みの 2 区間切除、CJK 文字比率スライス＆ハードウォール制限 (`transcribe.py`)**：
    - 文中の言い淀み（`[A + B_ng + B_ok + C]`）を `[A]` と `[B_ok + C]` の 2 つのクリーンなサブユニットに分割（`_extract_matched_word_spans_by_transcript`）し、CJK 複数文字トークンの比率補間（`_slice_words_on_char_span`）と隣接未採用語から `0.001s` 手前で止めるハードウォール制限（`next_word_hard_wall` / `prev_word_hard_wall`）を適用します。
 4. **レイヤー 4：グローバル・クリップ間結合 (`coalesce_adjacent_sub_units`)**：

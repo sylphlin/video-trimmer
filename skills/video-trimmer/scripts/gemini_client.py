@@ -22,6 +22,7 @@ from .constants import (
 )
 from .exceptions import GeminiAPIError
 from .gcs_utils import guess_mime_type, upload_file_to_gcs
+from .script_aligner import extract_script_blocks
 from .transcribe import format_asr_transcript_for_prompt
 
 logger = logging.getLogger(__name__)
@@ -167,8 +168,6 @@ def format_script_blocks_for_prompt(script_content: str) -> str:
     2. Split spoken script clauses into numbered anchors ([Script Block 01], ...).
     3. Guarantee 100% numbering parity between the Gemini prompt and the EDL auditor.
     """
-    from .edl_auditor import extract_script_blocks
-
     blocks = extract_script_blocks(script_content)
     if not blocks:
         return ""

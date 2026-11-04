@@ -52,12 +52,16 @@ from .constants import (
 )
 from .edl_auditor import (
     audit_edl_quality,
-    deduplicate_and_sort_clips,
-    detect_micro_window_anomalies,
     generate_edl_audit_markdown,
-    occlude_expanded_sub_units,
-    repair_edl_micro_windows,
     sanitize_refined_edl,
+)
+from .edl_occlusion import (
+    deduplicate_and_sort_clips,
+    occlude_expanded_sub_units,
+)
+from .edl_repair import (
+    detect_micro_window_anomalies,
+    repair_edl_micro_windows,
 )
 from .exceptions import FFmpegError, InvalidInputError, VideoTrimmerError
 from .exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
