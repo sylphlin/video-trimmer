@@ -59,7 +59,7 @@ from .edl_auditor import (
     repair_edl_micro_windows,
     sanitize_refined_edl,
 )
-from .exceptions import InvalidInputError, VideoTrimmerError
+from .exceptions import FFmpegError, InvalidInputError, VideoTrimmerError
 from .exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
 from .gcs_utils import delete_gcs_blob, is_gdrive_source, download_gdrive_file_with_cache
 from .gemini_client import (
@@ -250,7 +250,6 @@ def _synchronize_composite_overlap_pivots(filtered_units: list[dict], audio, sr:
             prev_su["next_word_hard_wall"] = prev_su["next_sentence_start"]
             prev_su["trimmed_tail"] = True
             prev_su["asr_transcript"] = new_pref_text
-            prev_su.pop("whisper_transcript", None)
             prev_su["transcript"] = _trim_transcript_tail_to_words(prev_su.get("transcript", ""), new_pref_words)
 
         if cont_start > 0:
@@ -262,7 +261,6 @@ def _synchronize_composite_overlap_pivots(filtered_units: list[dict], audio, sr:
             curr_su["prev_sentence_end"] = max(float(curr_prev), cut_prev_end) if curr_prev is not None else cut_prev_end
             curr_su["trimmed_head"] = True
             curr_su["asr_transcript"] = new_cont_text
-            curr_su.pop("whisper_transcript", None)
             curr_su["transcript"] = _trim_transcript_head_to_words(curr_su.get("transcript", ""), new_cont_words)
 
 
@@ -293,7 +291,7 @@ def _expand_and_occlude_edl_clips(
         base_topic = str(c.get("topic") or f"Clip {c.get('clip_id', 1)}")
         for idx, su in enumerate(sub_units):
             topic_label = base_topic if len(sub_units) == 1 else f"{base_topic} (#{idx + 1})"
-            asr_tr = su.get("asr_transcript") or su.get("whisper_transcript") or su["transcript"]
+            asr_tr = su.get("asr_transcript") or su["transcript"]
             expanded_units.append({
                 "parent_clip": c,
                 "topic": topic_label,
@@ -400,7 +398,7 @@ def _run(args):
     whisper_segs = []
     whisper_sentences = []
 
-    if not args.skip_whisper:
+    if not args.skip_asr:
         words_json = out_dir / f"{base_name}_words.json"
         asr_label = (
             f"Chirp 3 (Cloud STT V2, {resolved_stt_location})"
@@ -427,6 +425,7 @@ def _run(args):
     # Layer 2: Gemini multimodal video understanding and dual-mode take arbitration
     inference_metrics = {}
     micro_window_repairs = []
+    prealigned_units: list[dict] | None = None
 
     if args.cached_json:
         cached_file = Path(args.cached_json).resolve()
@@ -490,7 +489,12 @@ def _run(args):
                 logger.info("    [Auto-Chunking] Splitting %.1fs active span into %d natural-pause chunks...", win_end - win_start, len(chunks))
 
             for idx, (c_start, c_end, c_units) in enumerate(chunks, start=1):
-                c_prompt = build_prompt(prompt_candidates, script_path=script_path, whisper_units=c_units)
+                c_prompt = build_prompt(
+                    prompt_candidates,
+                    script_path=script_path,
+                    whisper_units=c_units,
+                    script_text=script_text,
+                )
                 use_window_meta = (c_start > 0.0) or (c_end < total_dur - 1.0) or (len(chunks) > 1)
                 start_offset = f"{int(c_start)}s" if use_window_meta else None
                 end_offset = f"{int(math.ceil(c_end))}s" if use_window_meta else None
@@ -542,6 +546,7 @@ def _run(args):
                         whisper_units=win_units,
                         anomaly=anomaly,
                         script_path=script_path,
+                        script_text=script_text,
                     )
                     w_raw_json, w_usage, w_dur = run_gemini_inference(
                         client,
@@ -596,6 +601,8 @@ def _run(args):
                         script_text=script_text,
                     )
                     micro_window_repairs.extend(post_repairs)
+                else:
+                    prealigned_units = preview_units
         finally:
             if is_ephemeral and not args.keep_gcs_upload:
                 delete_gcs_blob(gcs_uri)
@@ -622,16 +629,27 @@ def _run(args):
     # Layer 3 & Layer 4: Sub-unit word trimming, cross-clip coalescing, and acoustic onset snapping
     logger.info("==> 5. Running text-locked word boundary trimming and acoustic onset snapping...")
     temp_wav = out_dir / f"temp_{base_name}.wav"
-    subprocess.run(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wav_proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if wav_proc.returncode != 0 or not temp_wav.exists():
+        temp_wav.unlink(missing_ok=True)
+        raise FFmpegError(f"Failed to extract 16kHz mono WAV from {video_path.name}:\n{wav_proc.stderr.strip()}")
     audio, sr = sf.read(str(temp_wav))
 
     try:
-        filtered_units = _expand_and_occlude_edl_clips(
-            model_edl=model_edl,
-            whisper_units=whisper_units,
-            total_dur=total_dur,
-            script_text=script_text,
+        filtered_units = (
+            prealigned_units
+            if prealigned_units is not None
+            else _expand_and_occlude_edl_clips(
+                model_edl=model_edl,
+                whisper_units=whisper_units,
+                total_dur=total_dur,
+                script_text=script_text,
+            )
         )
 
         # Synchronize shared overlap pivots across composite prefix -> continuation pairs
@@ -703,7 +721,7 @@ def _run(args):
                 "in_margin": in_m,
                 "out_margin": out_m,
                 "transcript": transcript,
-                "asr_transcript": su.get("asr_transcript") or su.get("whisper_transcript") or transcript,
+                "asr_transcript": su.get("asr_transcript") or transcript,
                 "composite_role": su.get("composite_role", "none"),
                 "is_composite_splice": bool(su.get("is_composite_splice", False)),
                 "llm_verified_window": bool(su.get("llm_verified_window", False)),
@@ -862,7 +880,7 @@ def main():
     parser.add_argument("--script", "-s", default=None, help="Optional reference shooting script or outline (.txt/.md)")
     parser.add_argument("--cached-json", default=None,
                         help="Path to an existing EDL JSON file to bypass cloud Gemini inference")
-    parser.add_argument("--skip-whisper", action="store_true", help="Skip word-level ASR transcription and use energy-only fallback")
+    parser.add_argument("--skip-asr", action="store_true", help="Skip word-level ASR transcription and use energy-only fallback")
     parser.add_argument("--strict", action="store_true", help="Exit with code 2 after writing audit reports if agent_verdict.pass_quality_gate is False")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose DEBUG-level logging")
     args = parser.parse_args()

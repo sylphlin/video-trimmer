@@ -81,21 +81,22 @@ flowchart TD
    - **기본 클라우드 엔진 (`--asr-engine chirp3`)**: Google Cloud Speech-to-Text V2 `chirp_3`(`STT_LOCATION=us`, `enableWordTimeOffsets=True`, 자동 구두점 활성화)를 사용하여 `0.001s` 정밀도의 단어 타임스탬프를 추출하며 18분 청크 분할(5초 오버랩)을 지원합니다. 클라우드 인증 및 권한 오류 시 Whisper로 암묵적 폴백 없이 즉시 Fail-Fast로 종료합니다.
    - **선택적 로컬 엔진 (`--asr-engine whisper`)**: 사용자가 로컬 전사를 명시적으로 요청한 경우 `mlx-whisper` 또는 `faster-whisper`를 지원합니다.
    - 호흡 휴지(`gap >= 0.20s` 및 CJK 다자간 호흡 휴지 `>= 0.35s`), 발화 지연 장음(`word_dur >= 1.20s`), 문장 부호 종결, 화자 교체의 물리적 경계만으로 `Sentence ID`를 분할하며 Python 문자열 유사도 추측을 배제합니다.
-2. **계층 2: 듀얼 모드 LLM 테이크 중재 및 복합 서브스팬 접합 (`gemini_client.py` / `edl_auditor.py`)**:
+2. **계층 2: 듀얼 모드 LLM 테이크 중재, 인접 단문 자동 확장 및 폐루프 마이크로 윈도우 복구 (`gemini_client.py` / `edl_auditor.py`)**:
+   - **구조화 스키마 제약 (`EDL_RESPONSE_SCHEMA`)**: 클립당 연속된 물리적 `Sentence ID` 범위를 강제하며, `transcript`에 포함되어 있으나 `Sentence ID`에서 누락된 인접 앞·뒤 짧은 절을 자동으로 보완(`_extend_omitted_adjacent_short_clauses`)합니다.
    - **Mode A: 대본 기반 단조 정렬 (촬영 대본 제공 시)**: SSOT 파서(`extract_script_blocks`)로 비발화 메타데이터 헤더를 제외하고 `[Script Block 01] .. [Script Block NN]`으로 구성하며, 문장 처음부터 다시 말한 경우 100% `Last-Take-Wins`를 적용합니다.
    - **Mode B: 무대본 의도 윈도우 중재 (대본 미제공 시)**: 미완성 조각(Abandoned Fragment)은 제거하고 의도적인 수사적 반복 강조는 보존합니다.
    - **우-좌 스팬 오클루전 (`resolve_composite_prefix_occlusions`)**: 후반부만 다시 녹음한 부분 픽업 테이크(`Take 1: A + B1 + C_ng`, `Take 2: B2 + C_ok`)에서는 최신 `Take 2`(`composite_role="continuation"`)를 기준으로 삼고, 최소 독립 절 조건(`is_viable_sub_span`, 길이 `>= 0.55s`)을 충족하는 앞부분 `A`(`composite_role="prefix"`)만 `Take 1`에서 보완합니다.
-   - **국소 마이크로 윈도우 재스캔 (`edl_auditor.py`)**: 누락 블록, 접두어 보완이 필요한 부분 일치 블록(`PARTIAL_SCRIPT_BLOCK_BACKFILL`), 꼬리-머리 리테이크(`TAIL_HEAD_RETAKE`), 클립 내 반복(`INTRA_CLIP_REPEAT`), 다중 테이크 충돌(`SCRIPT_TAKE_COLLISION`)을 감지하여 해당 `15s–90s` 구간만 `VideoMetadata`로 재스캔합니다.
+   - **정렬 후 폐루프 검증 및 국소 마이크로 윈도우 재스캔 (`edl_auditor.py`)**: GCS 임시 비디오 삭제 전 물리적 단어 정렬 결과(`asr_transcript`)를 폐루프 검증하여 누락 블록, 접두어 보완이 필요한 부분 일치 블록(`PARTIAL_SCRIPT_BLOCK_BACKFILL`), 대본 구절 중복 잔류(`SCRIPT_PHRASE_MULTIPLICITY`, 대본 내 정당한 반복 화이트리스트 지원), 대본 외 불필요 구간(`UNSCRIPTED_EXTRANEOUS_SPAN`), 꼬리-머리 리테이크(`TAIL_HEAD_RETAKE`), 클립 내 반복(`INTRA_CLIP_REPEAT`), 다중 테이크 충돌(`SCRIPT_TAKE_COLLISION`)을 감지하고 해당 `15s–90s` 구간만 `VideoMetadata`로 재스캔합니다.
 3. **계층 3: 문장 내 말더듬 2구간 제거, CJK 비율 보간 및 하드월 클램핑 (`transcribe.py`)**:
    - 문장 중간 말더듬(`[A + B_ng + B_ok + C]`)을 `[A]`와 `[B_ok + C]` 두 개의 깔끔한 서브 유닛으로 분할(`_extract_matched_word_spans_by_transcript`)하고, CJK 다자 토큰 비율 보간(`_slice_words_on_char_span`) 및 인접 미선택 단어 `0.001s` 전 하드월 제한(`next_word_hard_wall` / `prev_word_hard_wall`)을 적용합니다.
 4. **계층 4: 글로벌 클립 간 무결성 병합 (`coalesce_adjacent_sub_units`)**:
    - 단어 간격이 `< 0.40s`인 연속 `Sentence ID`를 자동 병합하면서 의도적인 복합 픽업 접합점(`is_composite_splice`)은 유지합니다.
 5. **계층 5: 결정론적 타임라인 자가 치유 및 8차원 품질 감사 (`edl_auditor.py`)**:
-   - 시간순 단조 증가, 하드월 상한 어미 보호(`source_out >= t_last`), `< 0.45s` 마이크로 클립 병합을 수행하고 `asr_engine`, `composite_splices_count`, `agent_verdict` 품질 게이트가 포함된 감사 보고서(`_edl_report.md` / `_edl_report.json`)를 생성합니다.
+   - 시간순 단조 증가, 하드월 상한 어미 보호(`source_out >= t_last`), `< 0.45s` 마이크로 클립 병합을 수행하고 `asr_engine`, `1_acoustic_lock`, `composite_splices_count`, `agent_verdict` 품질 게이트가 포함된 감사 보고서(`_edl_report.md` / `_edl_report.json`)를 생성합니다.
 6. **음향 온셋 스내핑, 중첩 피벗 동기화, 20 ms 마이크로 페이드 및 선택적 1.12x 펀치인 (`acoustic.py` / `render.py`)**:
    - 휴지 후 부풀려진 단어 시작점 보정(`clamp_post_pause_word_onset`), 중첩 구간의 최소 RMS 에너지 지점 피벗 동기화(`find_optimal_overlap_pivot`), 음량 매칭(`compute_composite_gain_db`), Apple Silicon `VideoToolbox` 하드웨어 가속, 20 ms 등전력 마이크로 페이드 및 선택적 `--punch-in-composite`(복합 연속 클립 `1.12x` 짝수 픽셀 줌)를 수행합니다.
 7. **Agent Plugins 1.0 표준 아키텍처 및 멀티 NLE 타임라인 지원 (`exporters.py`)**:
-   - 핵심 스크립트(`chirp3_asr.py` 포함)와 프롬프트는 `skills/video-trimmer/`(SSOT)에 위치하며, `Composite Splice (Pick-up)` 타임라인 `<marker>`가 포함된 **FCP7 XML**, **FCPXML v1.9** 및 **CSV**를 내보냅니다(총 126개 오프라인 단위 테스트 통과).
+   - 핵심 스크립트(`chirp3_asr.py` 포함)와 프롬프트는 `skills/video-trimmer/`(SSOT)에 위치하며, `Composite Splice (Pick-up)` 타임라인 `<marker>`가 포함된 **FCP7 XML**, **FCPXML v1.9** 및 **CSV**를 내보냅니다(총 152개 오프라인 단위 테스트 통과).
 
 ---
 

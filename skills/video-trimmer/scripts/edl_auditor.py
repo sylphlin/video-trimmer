@@ -8,8 +8,6 @@ ASD-STE100:
 4. Generate an 8-dimension rough-cut audit report (.json and .md) with a top-level agent_verdict.
 """
 
-from __future__ import annotations
-
 import difflib
 import logging
 import math
@@ -270,7 +268,7 @@ def _clip_dual_texts(clip: dict, unit_by_id: dict[int, dict], whisper_units: lis
     quality auditors can inspect both LLM-cleaned text and physical ASR words.
     """
     llm_text = (clip.get("transcript") or "").strip()
-    w_text = (clip.get("asr_transcript") or clip.get("whisper_transcript") or "").strip()
+    w_text = (clip.get("asr_transcript") or "").strip()
     if not w_text:
         sids = _resolve_clip_sentence_ids(clip, whisper_units)
         t_first = clip.get("t_first")
@@ -662,7 +660,7 @@ def _is_complementary_composite_pair(
     ) or _detect_tail_head_overlap(llm_a, llm_b, script_blocks=script_blocks):
         return False
 
-    t_a_in, t_a_out = _clip_time_bounds(clip_a, unit_by_id, whisper_units)
+    _, t_a_out = _clip_time_bounds(clip_a, unit_by_id, whisper_units)
     t_b_in, t_b_out = _clip_time_bounds(clip_b, unit_by_id, whisper_units)
     if t_b_in < t_a_out - 0.05 or (t_b_in - t_a_out) > 45.0 or t_b_out <= t_a_out:
         return False
@@ -809,7 +807,6 @@ def resolve_composite_prefix_occlusions(
                 prev["transcript"] = trimmed_tr
                 prev["trimmed_tail"] = True
                 prev.pop("asr_transcript", None)
-                prev.pop("whisper_transcript", None)
                 prev.pop("t_last", None)
 
         # Verify remaining prefix viability
@@ -851,12 +848,7 @@ def occlude_expanded_sub_units(
         return []
 
     script_blocks = extract_script_blocks(script_text) if script_text else []
-    working = []
-    for su in filtered_units:
-        su_c = dict(su)
-        if "asr_transcript" not in su_c and "whisper_transcript" in su_c:
-            su_c["asr_transcript"] = su_c.pop("whisper_transcript")
-        working.append(su_c)
+    working = [dict(su) for su in filtered_units]
 
     # Pass 1: Trim immediate opening stutters (`A_stutter + A_clean + B`) on unverified or Mode A sub-units
     for su in working:
@@ -899,7 +891,6 @@ def occlude_expanded_sub_units(
                 )
                 su["trimmed_head"] = True
                 su["asr_transcript"] = new_w_text
-                su.pop("whisper_transcript", None)
                 tr_raw = su.get("transcript") or ""
                 tr_norm = normalize_text(tr_raw)
                 if len(tr_norm) >= 2 * trim_head_k and (
@@ -952,8 +943,8 @@ def occlude_expanded_sub_units(
             if pair_verified and not explicit_composite and not same_parent and not script_blocks:
                 break
 
-            p_text = prev_su.get("asr_transcript") or prev_su.get("whisper_transcript") or prev_su.get("transcript") or ""
-            c_text = curr_su.get("asr_transcript") or curr_su.get("whisper_transcript") or curr_su.get("transcript") or ""
+            p_text = prev_su.get("asr_transcript") or prev_su.get("transcript") or ""
+            c_text = curr_su.get("asr_transcript") or curr_su.get("transcript") or ""
             p_norm = normalize_text(p_text)
             c_norm = normalize_text(c_text)
             if not p_norm or not c_norm:
@@ -1042,7 +1033,6 @@ def occlude_expanded_sub_units(
             )
             prev_su["trimmed_tail"] = True
             prev_su["asr_transcript"] = new_text
-            prev_su.pop("whisper_transcript", None)
 
             raw_p_tr = prev_su.get("transcript") or ""
             raw_c_tr = curr_su.get("transcript") or c_text
@@ -1278,7 +1268,6 @@ def _extend_omitted_adjacent_short_clauses(
                         if c.get("source_in") is not None and prev_start < float(c["source_in"]):
                             c["source_in"] = prev_start
                         c.pop("asr_transcript", None)
-                        c.pop("whisper_transcript", None)
 
                         # Recompute alignment blocks before evaluating tail extension
                         _, w_text = _clip_dual_texts(c, unit_by_id, whisper_units)
@@ -1325,7 +1314,6 @@ def _extend_omitted_adjacent_short_clauses(
                             if c.get("source_out") is not None and next_end > float(c["source_out"]):
                                 c["source_out"] = next_end
                             c.pop("asr_transcript", None)
-                            c.pop("whisper_transcript", None)
 
     return clips
 
@@ -1466,7 +1454,7 @@ def _detect_script_precision_anomalies(
     for idx, c in enumerate(clips):
         t_in, t_out = _clip_time_bounds(c, unit_by_id, whisper_units)
         bounds.append((t_in, t_out))
-        has_aligned_asr = bool((c.get("asr_transcript") or c.get("whisper_transcript") or "").strip())
+        has_aligned_asr = bool((c.get("asr_transcript") or "").strip())
         llm_t, w_t = _clip_dual_texts(c, unit_by_id, whisper_units)
         eff_t = w_t if has_aligned_asr else llm_t
         eff_n = normalize_text(eff_t)
@@ -2265,11 +2253,10 @@ def sanitize_refined_edl(
                     prev_sids.append(sid)
             prev["sentence_ids"] = prev_sids
             prev["transcript"] = join_words_for_display([prev.get("transcript", ""), c.get("transcript", "")])
-            prev_asr_tr = prev.get("asr_transcript") or prev.get("whisper_transcript") or ""
-            curr_asr_tr = c.get("asr_transcript") or c.get("whisper_transcript") or ""
+            prev_asr_tr = prev.get("asr_transcript") or ""
+            curr_asr_tr = c.get("asr_transcript") or ""
             if prev_asr_tr or curr_asr_tr:
                 prev["asr_transcript"] = join_words_for_display([prev_asr_tr, curr_asr_tr])
-                prev.pop("whisper_transcript", None)
             prev["cps"], _ = calculate_clip_cps(prev["transcript"], prev["duration"])
             prev["llm_verified_window"] = bool(
                 prev.get("llm_verified_window") and c.get("llm_verified_window")
@@ -2726,8 +2713,8 @@ def generate_edl_audit_markdown(report: dict, output_md_path: Path) -> None:
     repairs = report.get("micro_window_repairs", [])
     san = summary.get("sanitization_stats", {})
 
-    d1 = dims.get("1_acoustic_lock") or dims.get("1_whisper_lock") or {}
-    d1_rate = d1.get("acoustic_lock_rate_pct", d1.get("whisper_lock_rate_pct"))
+    d1 = dims.get("1_acoustic_lock", {})
+    d1_rate = d1.get("acoustic_lock_rate_pct")
     d2 = dims.get("2_timeline_integrity", {})
     d3 = dims.get("3_retake_and_speaker_hygiene", {})
     d4 = dims.get("4_script_coverage", {})

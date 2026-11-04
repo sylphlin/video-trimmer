@@ -80,19 +80,20 @@ flowchart TD
 1. **Layer 1 — Dual-Engine Word-Level Acoustic & Punctuation Segmentation (`chirp3_asr.py` / `transcribe.py`)**:
    - **Default Engine (`--asr-engine chirp3`)**: Uses Google Cloud Speech-to-Text V2 `chirp_3` (`STT_LOCATION=us`, `enableWordTimeOffsets=True`, `enableAutomaticPunctuation=True`) to extract `0.001 s` word timestamps with automatic 18-minute chunking (5-second overlap) and 1-to-1 Simplified-to-Traditional character normalization for `zh-TW`. Enforces strict Fail-Fast on cloud or authentication errors without silent fallback to Whisper.
    - **Optional Local Engine (`--asr-engine whisper`)**: Supports offline transcription via `mlx-whisper` (Apple Silicon Metal) or `faster-whisper` (CPU/CUDA) when requested by the user.
-   - Splits `Sentence ID` units purely on physical boundaries: breath pauses (`gap >= 0.20 s`, plus multi-character CJK breath splits `>= 0.35 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), punctuation closure, and speaker turns, while preserving conjunction attachment (`CONJUNCTIONS`). Python never guesses semantic retakes via string similarity.
-2. **Layer 2 — Dual-Mode LLM Take Arbitration & Last-Take-Anchored Composite Sub-Spans (`gemini_client.py` / `edl_auditor.py`)**:
+   - Splits `Sentence ID` units strictly on physical and universal punctuation boundaries: breath pauses (`gap >= 0.20 s`, comma-absorbed pauses `>= 0.22 s`, micro-paused clause commas `>= 0.18 s`, and multi-character CJK breath splits `>= 0.35 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), closure punctuation, and speaker turns, without language-specific conjunction or filler word lists. Python never guesses semantic retakes via string similarity.
+2. **Layer 2 — Dual-Mode LLM Take Arbitration, Adjacent Short-Clause Recovery, & Closed-Loop Micro-Window Repair (`gemini_client.py` / `edl_auditor.py`)**:
+   - **Structured Schema & Adjacent Short-Clause Auto-Extension**: Enforces `EDL_RESPONSE_SCHEMA` with contiguous physical `Sentence ID` ranges per clip, and auto-extends `sentence_ids` when an unclaimed adjacent opening or closing short clause is explicitly present in `transcript` (`_extend_omitted_adjacent_short_clauses`).
    - **Mode A: Monotonic Script-Anchored Alignment (With Shooting Script)**: Strips YAML frontmatter, stage directions, and metadata headers via `extract_script_blocks` (`[Script Block 01] .. [Script Block NN]`). Enforces `Last-Take-Wins` when the speaker restarts a block from the beginning.
    - **Mode B: Unscripted Intent-Window Arbitration (Without Script)**: Prunes abandoned fragments and false starts while preserving intentional rhetorical repetition.
    - **Last-Take-Anchored Right-to-Left Span Occlusion (`resolve_composite_prefix_occlusions`)**: When the speaker performs a partial tail pick-up (`Take 1: A + B1 + C_ng`, `Take 2: B2 + C_ok`), anchors on `Take 2` (`composite_role="continuation"`) and backfills only the non-occluded prefix `A` (`composite_role="prefix"`) from `Take 1` if `A` meets the script-neutral viability threshold (`is_viable_sub_span`, duration `>= 0.55 s`).
-   - **Surgical Micro-Window Repair (`edl_auditor.py`)**: Detects missing blocks, partial block coverage (`PARTIAL_SCRIPT_BLOCK_BACKFILL`), tail-to-head retakes (`TAIL_HEAD_RETAKE`), intra-clip repeats (`INTRA_CLIP_REPEAT`), and multi-take collisions (`SCRIPT_TAKE_COLLISION`), then re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata`.
+   - **Closed-Loop Post-Alignment Verification & Micro-Window Repair (`edl_auditor.py`)**: Verifies physical word-aligned `asr_transcript` before deleting staged GCS media. Detects missing blocks, partial block coverage (`PARTIAL_SCRIPT_BLOCK_BACKFILL`), duplicate script clauses (`SCRIPT_PHRASE_MULTIPLICITY` with legitimate script repetition whitelisting), unscripted extraneous spans (`UNSCRIPTED_EXTRANEOUS_SPAN`), tail-to-head retakes (`TAIL_HEAD_RETAKE`), intra-clip repeats (`INTRA_CLIP_REPEAT`), and multi-take collisions (`SCRIPT_TAKE_COLLISION`), then re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata`.
 3. **Layer 3 — Two-Span Stumble Excision, CJK Proportional Slicing, & Hard-Wall Clamping (`transcribe.py`)**:
    - Supports **Intra-Sentence Mid-Span Excision** (`_extract_matched_word_spans_by_transcript`), splitting `[A + B_ng + B_ok + C]` into clean sub-units `[A]` and `[B_ok + C]` around mid-sentence stumbles.
    - Interpolates multi-character CJK word tokens proportionally (`_slice_words_on_char_span`) and clamps internal cuts `0.001 s` away from adjacent unselected words (`next_word_hard_wall` / `prev_word_hard_wall`) to prevent ghost syllables.
 4. **Layer 4 — Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`)**:
    - Merges consecutive `Sentence ID`s across adjacent clips when the physical inter-word gap is `< 0.40 s`, while preserving intentional composite pick-up splices (`is_composite_splice`).
 5. **Layer 5 — Deterministic Timeline Sanitization & 8-Dimension Quality Audit (`edl_auditor.py`)**:
-   - Enforces chronological monotonicity (`source_in < source_out` and `c[i].source_out <= c[i+1].source_in`), caps plosive-tail restoration at `next_word_hard_wall`, merges `< 0.45 s` flash-frame micro-clips, and generates `_edl_report.md` and `_edl_report.json` with `asr_engine`, `composite_splices_count`, and `agent_verdict`.
+   - Enforces chronological monotonicity (`source_in < source_out` and `c[i].source_out <= c[i+1].source_in`), caps plosive-tail restoration at `next_word_hard_wall`, merges `< 0.45 s` flash-frame micro-clips, and generates `_edl_report.md` and `_edl_report.json` with `asr_engine`, `1_acoustic_lock`, `composite_splices_count`, and `agent_verdict`.
 6. **Acoustic Onset Snapping, Overlap Pivot Sync, & Loudness Matching (`acoustic.py`)**:
    - Clamps post-pause inflated word onsets (`clamp_post_pause_word_onset`), synchronizes overlapping composite phrase pivots at minimum RMS energy valleys (`find_optimal_overlap_pivot`), tightens composite cut seams (`40 ms` buffers), and matches continuation loudness (`compute_composite_gain_db`, clamped to `±6.0 dB`).
 7. **20 ms Equal-Power Micro-Crossfade & Optional 1.12x Composite Punch-In (`render.py`)**:
@@ -148,7 +149,7 @@ video-trimmer/
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python dependencies
-└── tests/                                   # Offline unit test suite (126 tests)
+└── tests/                                   # Offline unit test suite (152 tests)
 ```
 
 ---
@@ -285,7 +286,7 @@ For an input video `raw_footage.mp4`, the agent automatically creates an `output
 
 ## Unit Testing
 
-Run the offline test suite (149 tests) before committing changes:
+Run the offline test suite (152 tests) before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v

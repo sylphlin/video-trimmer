@@ -92,6 +92,33 @@ class TestAutoChunking(unittest.TestCase):
         self.assertEqual(win_end, 1382.0)
         self.assertEqual([u["sentence_id"] for u in filtered], [2, 3])
 
+    def test_calculate_active_script_window_ignores_frontmatter_and_metadata_headers(self):
+        """Verify YAML frontmatter and non-spoken metadata lines do not dilute active window coverage."""
+        whisper_units = [
+            {"sentence_id": 1, "start": 50.0, "end": 200.0, "text": "上一集講的是傳統網路交換器設定"},
+            {"sentence_id": 2, "start": 900.0, "end": 1200.0, "text": "今天我們要介紹雲端語音轉錄與多模態剪輯架構"},
+        ]
+        script_text = (
+            "---\n"
+            "episode: 12\n"
+            "camera: A-cam\n"
+            "---\n"
+            "標題：雲端多模態自動粗剪系統深度解析\n"
+            "主題：語音時間戳與視覺選片整合實務\n"
+            "大綱：架構介紹、效能實測、總結建議\n"
+            "備註：請保持平穩語速並直視鏡頭\n"
+            "內文：今天我們要介紹雲端語音轉錄與多模態剪輯架構。\n"
+        )
+        win_start, win_end, filtered = calculate_active_script_window(
+            whisper_units=whisper_units,
+            script_text=script_text,
+            total_duration=2000.0,
+            padding_seconds=20.0,
+        )
+        self.assertEqual(win_start, 880.0)
+        self.assertEqual(win_end, 1220.0)
+        self.assertEqual([u["sentence_id"] for u in filtered], [2])
+
     def test_merge_chunked_edl_renumbers_monotonically(self):
         """Verify merging keeps all timestamps monotonic and renumbers clip_id sequentially."""
         chunk_results = [

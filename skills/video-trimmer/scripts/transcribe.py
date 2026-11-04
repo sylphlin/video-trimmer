@@ -476,58 +476,38 @@ def transcribe_video_words(
     ASD-STE100:
     1. Default to Google Cloud Speech-to-Text V2 Chirp 3 (`asr_engine="chirp3"`) with millisecond precision.
     2. Fail fast with VideoTrimmerError on Cloud STT/GCS/ADC errors without falling back to Whisper.
-    3. Tag `<basename>_words.json` with `asr_engine` and migrate legacy `<basename>_whisper_raw.json` caches automatically.
+    3. Cache and validate `<basename>_words.json` strictly by matching its `asr_engine` metadata tag.
     """
     video_path = Path(video_path)
     out_json = Path(out_json_path)
     sentences_json = out_json.parent / f"{video_path.stem}_sentences.json"
-    legacy_json = out_json.parent / f"{video_path.stem}_whisper_raw.json"
     engine = (asr_engine or DEFAULT_ASR_ENGINE).strip().lower()
     if engine not in ("chirp3", "whisper"):
         raise VideoTrimmerError(f"Unsupported ASR engine '{asr_engine}'. Expected 'chirp3' or 'whisper'.")
 
     raw_results = None
-    cache_source = None
-    if not force:
-        if out_json.exists():
-            cache_source = out_json
-        elif legacy_json.exists() and legacy_json != out_json:
-            cache_source = legacy_json
-
-    if cache_source is not None:
+    if not force and out_json.exists():
         try:
-            with open(cache_source, "r", encoding="utf-8") as f:
+            with open(out_json, "r", encoding="utf-8") as f:
                 cached_payload = json.load(f)
-            if isinstance(cached_payload, list):
-                cached_engine = "whisper"
-                cached_segments = cached_payload
-            elif isinstance(cached_payload, dict):
-                cached_engine = str(cached_payload.get("asr_engine") or "whisper").strip().lower()
+            if isinstance(cached_payload, dict):
+                cached_engine = str(cached_payload.get("asr_engine") or "").strip().lower()
                 cached_segments = list(cached_payload.get("segments") or [])
             else:
                 cached_engine = ""
                 cached_segments = []
 
             if cached_engine == engine and cached_segments:
-                logger.info("Loading cached %s word timestamps: %s", engine, cache_source.name)
+                logger.info("Loading cached %s word timestamps: %s", engine, out_json.name)
                 raw_results = cached_segments
-                if cache_source == legacy_json and out_json != legacy_json and not out_json.exists():
-                    migrated_obj = (
-                        cached_payload
-                        if isinstance(cached_payload, dict)
-                        else {"asr_engine": cached_engine, "language": language, "segments": cached_segments}
-                    )
-                    with open(out_json, "w", encoding="utf-8") as mf:
-                        json.dump(migrated_obj, mf, ensure_ascii=False, indent=2)
-                    logger.info("Migrated legacy word timestamp cache %s -> %s", legacy_json.name, out_json.name)
             elif cached_segments:
                 logger.info(
                     "Cached word timestamps engine mismatch (cached=%s, requested=%s); re-transcribing...",
-                    cached_engine,
+                    cached_engine or "untagged",
                     engine,
                 )
         except Exception as exc:
-            logger.warning("Failed to read cached word timestamps %s (%s); re-transcribing...", cache_source.name, exc)
+            logger.warning("Failed to read cached word timestamps %s (%s); re-transcribing...", out_json.name, exc)
 
     if raw_results is None:
         if engine == "chirp3":
@@ -629,25 +609,7 @@ def transcribe_video_words(
     return raw_results, sentences
 
 
-def transcribe_video_whisper(
-    video_path,
-    out_json_path,
-    model_name="small",
-    language: str = "auto",
-    force: bool = False,
-):
-    """Backward-compatible wrapper for local Whisper word-level transcription."""
-    return transcribe_video_words(
-        video_path=video_path,
-        out_json_path=out_json_path,
-        asr_engine="whisper",
-        whisper_model=model_name,
-        language=language,
-        force=force,
-    )
-
-
-def format_whisper_transcript_for_prompt(whisper_sentences):
+def format_asr_transcript_for_prompt(asr_sentences):
     """
     Format merged ASR sentences into the ground-truth text-based editing list for the Gemini prompt.
 
@@ -667,7 +629,7 @@ def format_whisper_transcript_for_prompt(whisper_sentences):
         "5. Partial Tail Pick-Up Backfill: when the latest `Sentence ID` is a partial pick-up covering ONLY the unfinished second half, emit the clean opening prefix (`\"composite_role\": \"prefix\"`) from the preceding attempt followed by the latest continuation (`\"composite_role\": \"continuation\"`) with zero repeated words.",
         "6. In `final_edl`, list ONLY contiguous retained `Sentence ID` integers in `sentence_ids` (never skip a `Sentence ID` inside one clip; emit separate clips for separate physical takes), write ONLY the clean retained spoken words in `transcript`, and align `source_in` and `source_out` to the sentence timestamps:\n",
     ]
-    for s in whisper_sentences:
+    for s in asr_sentences:
         lines.append(f"[Sentence ID: {s['id']:3d}] {s['start']:6.2f}s -> {s['end']:6.2f}s | {s['text']}")
     return "\n".join(lines)
 
@@ -1420,19 +1382,6 @@ def _extract_matched_word_spans_by_transcript(
     return _full_passthrough()
 
 
-def _trim_matched_words_by_transcript(matched_sentences: list[dict], transcript: str) -> list[dict]:
-    """
-    Trim leading and trailing words of matched sentences to match the LLM-selected transcript.
-    """
-    groups = _extract_matched_word_spans_by_transcript(matched_sentences, transcript)
-    if len(groups) == 1:
-        return groups[0]["sentences"]
-    combined: list[dict] = []
-    for g in groups:
-        combined.extend(g["sentences"])
-    return combined if combined else matched_sentences
-
-
 def _split_sentence_words_by_internal_gap(sentence: dict, max_word_gap: float = 0.45) -> list[dict]:
     """
     Split a sentence into compact speech chunks when internal word gaps exceed max_word_gap.
@@ -1860,21 +1809,14 @@ def coalesce_adjacent_sub_units(
             curr_text = (unit.get("transcript") or "").strip()
             if curr_text and curr_text not in prev_text:
                 prev["transcript"] = join_words_for_display([prev_text, curr_text])
-            prev_w_text = (prev.get("asr_transcript") or prev.get("whisper_transcript") or "").strip()
-            curr_w_text = (unit.get("asr_transcript") or unit.get("whisper_transcript") or "").strip()
+            prev_w_text = (prev.get("asr_transcript") or "").strip()
+            curr_w_text = (unit.get("asr_transcript") or "").strip()
             if curr_w_text and curr_w_text not in prev_w_text:
                 prev["asr_transcript"] = join_words_for_display([prev_w_text, curr_w_text])
             elif prev_w_text:
                 prev["asr_transcript"] = prev_w_text
-            prev.pop("whisper_transcript", None)
         else:
-            u_copy = dict(unit)
-            if "asr_transcript" not in u_copy and "whisper_transcript" in u_copy:
-                u_copy["asr_transcript"] = u_copy.pop("whisper_transcript")
-            coalesced.append(u_copy)
-
-    if "asr_transcript" not in coalesced[0] and "whisper_transcript" in coalesced[0]:
-        coalesced[0]["asr_transcript"] = coalesced[0].pop("whisper_transcript")
+            coalesced.append(dict(unit))
 
     return coalesced
 
@@ -1886,24 +1828,26 @@ def calculate_active_script_window(
     padding_seconds: float = 20.0,
 ) -> tuple[float, float, list[dict]]:
     """
-    Align spoken clauses from a reference script against Whisper sentences to locate
+    Align spoken clauses from a reference script against ASR sentences to locate
     the active recording window in a multi-episode or long camera roll.
 
     ASD-STE100:
-    This function matches script clauses with transcript sentences.
-    It returns the start time, end time, and sentences inside the active window.
+    1. Parse spoken blocks via `extract_script_blocks` to exclude YAML frontmatter and metadata lines.
+    2. Match spoken script clauses with transcript sentences and return `(win_start, win_end, units)`.
     """
     if not whisper_units or not script_text or not script_text.strip():
         return 0.0, total_duration, whisper_units
 
-    raw_lines = re.split(r"[\n。！？!?；;]+", script_text)
+    from .edl_auditor import extract_script_blocks
+
+    blocks = extract_script_blocks(script_text)
     script_clauses = []
-    for line in raw_lines:
-        cleaned = re.sub(r"^\s*[#*>\-\d.]+\s*", "", line)
-        cleaned = re.sub(r"（.*?）|\(.*?\)|【.*?】|\[.*?\]", "", cleaned)
-        norm = normalize_text(cleaned)
-        if len(norm) >= 6:
-            script_clauses.append(norm)
+    for blk in blocks:
+        for clause_raw in re.split(r"[。！？!?；;]+", blk["raw_text"]):
+            cleaned = re.sub(r"（.*?）|\(.*?\)|【.*?】|\[.*?\]", "", clause_raw)
+            norm = normalize_text(cleaned)
+            if len(norm) >= 6:
+                script_clauses.append(norm)
 
     if not script_clauses:
         return 0.0, total_duration, whisper_units

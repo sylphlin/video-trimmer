@@ -61,7 +61,8 @@ video-trimmer/
 1. **Multimodal Native Understanding (Vertex AI Gemini 3.8 Flash)**:
    - Stages raw footage directly to Google Cloud Storage (GCS) with automatic ephemeral lifecycle cleanup.
    - Evaluates presenter eye contact, facial expressions, stuttering, and retakes simultaneously via Vertex AI.
-2. **Dual-Mode Take Arbitration & Last-Take-Anchored Composite Backfill**:
+2. **Dual-Mode Take Arbitration (`EDL_RESPONSE_SCHEMA`), Adjacent Short-Clause Recovery, & Composite Backfill**:
+   - Enforces structured `EDL_RESPONSE_SCHEMA` output with contiguous physical `Sentence ID` ranges per clip, and auto-recovers unclaimed adjacent opening/closing short clauses present in `transcript` (`_extend_omitted_adjacent_short_clauses`).
    - **Mode A (`--script`)**: Monotonic `[Script Block NN]` alignment keeping at most one winning take per script block.
    - **Mode B (No `--script`)**: Unscripted Intent-Window arbitration pruning abandoned fragments while preserving intentional rhetorical repetition.
    - **Partial Tail Pick-Up Backfill (`Right-to-Left Span Occlusion`)**: Keeps 100% `Last-Take-Wins` on full restarts, while automatically backfilling the missing opening prefix (`composite_role: "prefix"`) from the preceding attempt when the presenter only re-records a partial tail pick-up (`composite_role: "continuation"`, minimum `>= 0.55s` and `>= 4` CJK chars / `>= 3` Latin words) or excises a mid-sentence stumble (`A + B_ng + B_ok + C`).
@@ -76,9 +77,9 @@ video-trimmer/
    - Clamps inflated post-pause word starts (`clamp_post_pause_word_onset`), snaps cut-ins before vocal cord vibration, applies compact `40ms` margins on composite seams, and enforces `next_word_hard_wall` locks so excised stumbles never bleed into retained audio.
 6. **Composite Loudness Gain Matching, 20ms Micro-Crossfades, & Optional `1.12x` Punch-In**:
    - Matches voiced RMS loudness across composite pick-up seams (`compute_composite_gain_db`), applies 20ms `afade` equal-power micro-fades (`iqsin`/`qsin`), and optionally applies an even-pixel `1.12x` framing punch-in (`--punch-in-composite`) in both MP4 renders and NLE timelines.
-7. **Pre-Render Surgical Micro-Window Repair & 8-Dimension Quality Audit (`edl_auditor.py`)**:
-   - Detects missing script blocks, partial script block backfills (`PARTIAL_SCRIPT_BLOCK_BACKFILL`), unanchored clips, and retake collisions before rendering, re-scanning only the affected `15s–90s` slice via `VideoMetadata(start_offset=..., end_offset=...)`.
-   - Outputs `<base>_<tag>_edl_report.md` and `<base>_<tag>_edl_report.json` with a top-level `agent_verdict`.
+7. **Closed-Loop Post-Alignment Verification, Micro-Window Repair, & 8-Dimension Quality Audit (`edl_auditor.py`)**:
+   - Verifies physical word-aligned `asr_transcript` before deleting staged GCS media, detecting missing script blocks, partial backfills (`PARTIAL_SCRIPT_BLOCK_BACKFILL`), duplicate script clauses (`SCRIPT_PHRASE_MULTIPLICITY`), unscripted extraneous spans (`UNSCRIPTED_EXTRANEOUS_SPAN`), unanchored clips, and retake collisions, then re-scanning only the affected `15s–90s` slice via `VideoMetadata(start_offset=..., end_offset=...)`.
+   - Outputs `<base>_<tag>_edl_report.md` and `<base>_<tag>_edl_report.json` with `1_acoustic_lock` and a top-level `agent_verdict`.
 8. **Universal NLE Project Export with Composite Markers**:
    - Generates frame-accurate **FCP 7 XML** (Premiere Pro & DaVinci Resolve) and **FCPXML v1.9** (Final Cut Pro) with `Composite Splice (Pick-up)` markers, alongside CSV and hardware-accelerated MP4 renders.
 
@@ -158,7 +159,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--cached-json`| | `None` | Path to existing EDL JSON to bypass cloud Gemini inference. |
 | `--suffix` | | `None` | Custom tag suffix for generated filenames. |
 | `--crf` | | `18` | FFmpeg H.264 rendering CRF parameter (18 = visually lossless). |
-| `--skip-whisper`| | `False` | Skip word-level ASR transcription and use energy-only fallback. |
+| `--skip-asr` | | `False` | Skip word-level ASR transcription and use energy-only fallback. |
 | `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False`. |
 | `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
 

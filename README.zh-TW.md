@@ -81,18 +81,19 @@ flowchart TD
    - **預設雲端引擎 (`--asr-engine chirp3`)**：採用 Google Cloud Speech-to-Text V2 `chirp_3`（`STT_LOCATION=us`，開啟 `enableWordTimeOffsets=True` 與自動標點），提取 `0.001s` 毫秒級逐字時間戳，內建 18 分鐘音訊自動切塊（含 5 秒重疊視窗）與 `zh-TW` 1 對 1 繁簡字元標準化；若遇雲端權限或認證異常，嚴格執行 Fail-Fast 終止（絕不靜默降級為 Whisper）。
    - **選用本機引擎 (`--asr-engine whisper`)**：當使用者明確指定本機轉錄時，支援 Apple Silicon Metal `mlx-whisper` 或 `faster-whisper`。
    - 僅依據物理邊界切分 `Sentence ID`：換氣停頓（`gap >= 0.20s`，以及中日韓多字詞間自然換氣 `>= 0.35s`）、吃螺絲拉長音起音（`word_dur >= 1.20s` 且單字元 `>= 0.45s`）、句尾標點與說話者輪替，絕不在 Python 端使用字串相似度猜測 NG 重講。
-2. **第二層：雙模式 LLM 語意擇優與跨鏡複合拼接 (`gemini_client.py` / `edl_auditor.py`)**：
+2. **第二層：雙模式 LLM 語意擇優、相鄰短子句自動補齊與閉環微視窗修復 (`gemini_client.py` / `edl_auditor.py`)**：
+   - **結構化輸出約束與相鄰短子句自動補齊**：透過 `EDL_RESPONSE_SCHEMA` 強制每個片段對應連續物理 `Sentence ID` 區間，並透過 `_extend_omitted_adjacent_short_clauses` 自動補回模型在 `transcript` 已保留但漏選 `Sentence ID` 的前後短子句。
    - **Mode A：有講稿單調錨定模式（提供拍攝講稿時）**：透過單一真相來源解析器（`extract_script_blocks`）自動過濾 YAML Frontmatter、鏡位指示與非口播標題欄位，切分為 `[Script Block 01] .. [Script Block NN]`。當講者整句重頭重唸時，100% 維持 `Last-Take-Wins`。
    - **Mode B：無講稿意圖視窗仲裁模式（未提供講稿時）**：剔除未完成殘句重講（Abandoned Fragment），同時保護刻意修辭排比強調。
    - **由右至左跨鏡區間遮罩 (`resolve_composite_prefix_occlusions`)**：當講者僅局部補錄後半段（例如 `Take 1: A + B1 + C_ng`、`Take 2: B2 + C_ok`）時，以最新 `Take 2`（`composite_role="continuation"`）為核心基準，僅從上一鏡 `Take 1` 回補未被覆蓋的前綴 `A`（`composite_role="prefix"`），並強制通過最小獨立子句門檻（`is_viable_sub_span`，時長 `>= 0.55s`）。
-   - **局部小視窗精準重掃 (`edl_auditor.py`)**：偵測遺漏段落、半句缺漏需前綴回補（`PARTIAL_SCRIPT_BLOCK_BACKFILL`）、跨片段句尾重講（`TAIL_HEAD_RETAKE`）、單一片段內部重複（`INTRA_CLIP_REPEAT`）與多 Take 衝突（`SCRIPT_TAKE_COLLISION`），僅重掃該 `15s–90s` 局部視訊區間。
+   - **對齊後閉環驗證與局部微視窗重掃 (`edl_auditor.py`)**：在刪除 GCS 暫存影片前先行驗證物理逐字對齊結果（`asr_transcript`），精準偵測遺漏段落、半句缺漏（`PARTIAL_SCRIPT_BLOCK_BACKFILL`）、講稿子句多重殘留（`SCRIPT_PHRASE_MULTIPLICITY`，支援講稿合法重複白名單）、非講稿廢詞滲漏（`UNSCRIPTED_EXTRANEOUS_SPAN`）、跨片段句尾重講（`TAIL_HEAD_RETAKE`）、單一片段內部重複（`INTRA_CLIP_REPEAT`）與多 Take 衝突（`SCRIPT_TAKE_COLLISION`），僅重掃該 `15s–90s` 局部視訊區間。
 3. **第三層：句中口誤雙區間挖除、中日韓字詞比例切分與鄰詞硬牆鉗制 (`transcribe.py`)**：
    - 支援**同句中段吃螺絲挖除**（`_extract_matched_word_spans_by_transcript`），將 `[A + B_ng + B_ok + C]` 自動拆解為 `[A]` 與 `[B_ok + C]` 兩個乾淨子單元。
    - 針對多字詞進行字元比例時間內插（`_slice_words_on_char_span`），並對相鄰未選取廢詞施加 `0.001s` 硬牆鉗制（`next_word_hard_wall` / `prev_word_hard_wall`），防止切入廢詞首音殘影。
 4. **第四層：跨片段連貫小句無縫合一 (`coalesce_adjacent_sub_units`)**：
    - 當相鄰片段為連續 `Sentence ID` 且物理字間距 `< 0.40s` 時自動合併為單一連續片段，同時保護跨鏡複合拼接切點（`is_composite_splice`）不被誤合併。
 5. **第五層：物理時間軸確定性自癒與 8 維度雙軌品質審計 (`edl_auditor.py`)**：
-   - 強制時間軸單調遞增、在鄰詞硬牆上限內保護字尾塞音（`source_out >= t_last`）、縫合 `< 0.45s` 閃幀微碎切，並輸出記錄 `asr_engine`、`composite_splices_count` 與 `agent_verdict` 的 `_edl_report.md` 及 `_edl_report.json`。
+   - 強制時間軸單調遞增、在鄰詞硬牆上限內保護字尾塞音（`source_out >= t_last`）、縫合 `< 0.45s` 閃幀微碎切，並輸出記錄 `asr_engine`、`1_acoustic_lock`、`composite_splices_count` 與 `agent_verdict` 的 `_edl_report.md` 及 `_edl_report.json`。
 6. **聲學起音鎖定、重疊切點同步與響度增益匹配 (`acoustic.py`)**：
    - 自動修正停頓後虛胖的詞首時間戳（`clamp_post_pause_word_onset`）、在複合句重疊詞組中尋找最低 RMS 能量波谷作為無縫切點（`find_optimal_overlap_pivot`）、收緊複合接縫緩衝（`40ms`），並自動補償前後兩鏡的音量落差（`compute_composite_gain_db`，限制於 `±6.0 dB`）。
 7. **20 ms 等功率音訊微淡化與選用 1.12x 複合縮放遮瑕 (`render.py`)**：
@@ -143,7 +144,7 @@ video-trimmer/
 │           └── video_cut_prompt.md          # 雙模式語意仲裁與局部補錄複合剪輯規範
 ├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
-└── tests/                                   # 離線單元測試套件（126 項測試）
+└── tests/                                   # 離線單元測試套件（152 項測試）
 ```
 
 ---
@@ -272,7 +273,7 @@ chmod +x setup.sh
 
 ## 單元測試 (Unit Testing)
 
-提交變更前請執行完整離線單元測試套件（149 項測試）：
+提交變更前請執行完整離線單元測試套件（152 項測試）：
 
 ```bash
 python3 -m unittest discover -s tests -v

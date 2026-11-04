@@ -39,6 +39,21 @@ def calculate_clip_cps(transcript, duration):
     return round(syllables / dur, 2), syllables
 
 
+def _sliding_window_rms(audio, starts: np.ndarray, win: int) -> np.ndarray:
+    """Compute RMS values at sample indices `starts` with window length `win` via cumulative sum."""
+    if len(starts) == 0 or win <= 0 or len(audio) < win:
+        return np.empty(0, dtype=np.float64)
+    s0 = int(starts[0])
+    s1 = min(len(audio), int(starts[-1]) + win)
+    seg = np.asarray(audio[s0:s1], dtype=np.float64)
+    csum = np.empty(len(seg) + 1, dtype=np.float64)
+    csum[0] = 0.0
+    np.cumsum(seg * seg, out=csum[1:])
+    rel = starts - s0
+    msq = (csum[rel + win] - csum[rel]) / float(win)
+    return np.sqrt(np.maximum(0.0, msq))
+
+
 def _estimate_local_noise_floor(audio, sr, center_sec: float) -> float:
     """Estimate local ambient RMS noise floor in a 2.2s window around center_sec."""
     hop = max(1, int(0.01 * sr))
@@ -48,8 +63,9 @@ def _estimate_local_noise_floor(audio, sr, center_sec: float) -> float:
     idx_end = min(len(audio), idx_center + int(1.2 * sr))
     if idx_end - idx_start <= win:
         return _SILENCE_THRESHOLD_LINEAR * 0.15
-    all_rms = [float(np.sqrt(np.mean(audio[i : i + win] ** 2))) for i in range(idx_start, idx_end - win, hop)]
-    return float(np.percentile(all_rms, 10)) if all_rms else _SILENCE_THRESHOLD_LINEAR * 0.15
+    starts = np.arange(idx_start, idx_end - win, hop, dtype=np.int64)
+    all_rms = _sliding_window_rms(audio, starts, win)
+    return float(np.percentile(all_rms, 10)) if len(all_rms) > 0 else _SILENCE_THRESHOLD_LINEAR * 0.15
 
 
 def clamp_post_pause_word_onset(
@@ -77,7 +93,6 @@ def clamp_post_pause_word_onset(
     if not (is_trimmed_head or gap_before >= 0.15) or (w_e - w_s) < 0.14 or len(audio) == 0:
         return round(w_s, 3)
 
-    hop = max(1, int(0.01 * sr))
     win = max(1, int(0.02 * sr))
     noise_floor = _estimate_local_noise_floor(audio, sr, (w_s + w_e) / 2.0)
     low_thresh = max(_SILENCE_THRESHOLD_LINEAR * 0.85, noise_floor * 1.6)
@@ -87,13 +102,11 @@ def clamp_post_pause_word_onset(
     if len(times) < 4:
         return round(w_s, 3)
 
-    rms_vals = []
-    for t in times:
-        idx = int(t * sr)
-        if idx + win > len(audio):
-            rms_vals.append(0.0)
-        else:
-            rms_vals.append(float(np.sqrt(np.mean(audio[idx : idx + win] ** 2))))
+    indices = (times * sr).astype(np.int64)
+    rms_vals = np.zeros(len(indices), dtype=np.float64)
+    valid_mask = (indices >= 0) & ((indices + win) <= len(audio))
+    if np.any(valid_mask):
+        rms_vals[valid_mask] = _sliding_window_rms(audio, indices[valid_mask], win)
 
     # Locate the rightmost sustained voiced core inside the word
     core_idx = None
@@ -133,11 +146,12 @@ def _segment_voiced_db(audio, sr: int, start_sec: float, end_sec: float) -> floa
     i_end = min(len(audio), int(end_sec * sr))
     if i_end - i_start < win:
         return None
-    frames = [float(np.sqrt(np.mean(audio[i : i + win] ** 2))) for i in range(i_start, i_end - win + 1, hop)]
-    if not frames:
+    starts = np.arange(i_start, i_end - win + 1, hop, dtype=np.int64)
+    frames = _sliding_window_rms(audio, starts, win)
+    if len(frames) == 0:
         return None
-    voiced = [r for r in frames if r >= _SILENCE_THRESHOLD_LINEAR * 0.9]
-    target = voiced if voiced else frames
+    voiced = frames[frames >= _SILENCE_THRESHOLD_LINEAR * 0.9]
+    target = voiced if len(voiced) > 0 else frames
     mean_rms = float(np.sqrt(np.mean(np.square(target))))
     if mean_rms <= 1e-7:
         return None

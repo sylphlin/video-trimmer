@@ -81,21 +81,22 @@ flowchart TD
    - **默认云端引擎 (`--asr-engine chirp3`)**：采用 Google Cloud Speech-to-Text V2 `chirp_3`（`STT_LOCATION=us`，启用 `enableWordTimeOffsets=True` 与自动标点），提取 `0.001s` 毫秒级逐词时间戳，支持 18 分钟长音频自动分块（5 秒重叠窗口）；遇到云端认证或权限错误时严格执行 Fail-Fast 终止，绝不静默降级为 Whisper。
    - **可选本地引擎 (`--asr-engine whisper`)**：在用户明确指定本地转录时，支持 `mlx-whisper`（Apple Silicon Metal）或 `faster-whisper`。
    - 仅依据物理边界切分 `Sentence ID`：换气停顿（`gap >= 0.20s` 及中日韩多字词自然换气 `>= 0.35s`）、吃螺丝拉长音起音（`word_dur >= 1.20s`）、句尾标点与说话人轮替，绝不在 Python 中使用字符串相似度猜测 NG 重录。
-2. **第二层：双模式 LLM 语义择优与跨镜复合拼接 (`gemini_client.py` / `edl_auditor.py`)**：
+2. **第二层：双模式 LLM 语义择优、相邻短子句自动补齐与闭环微视窗修复 (`gemini_client.py` / `edl_auditor.py`)**：
+   - **结构化输出约束 (`EDL_RESPONSE_SCHEMA`)**：强制 Gemini 输出单调连续的物理 `Sentence ID` 范围，并支持**相邻短子句自动补齐**（`_extend_omitted_adjacent_short_clauses`），自动找回模型在 `transcript` 中已保留但漏选 `Sentence ID` 的开头或结尾短子句。
    - **Mode A：有讲稿单调锚定模式（提供拍摄讲稿时）**：通过单一真相来源（SSOT）解析器（`extract_script_blocks`）自动过滤 YAML Frontmatter、舞台指示与非口播元数据行，将口播台词格式化为 `[Script Block 01] .. [Script Block NN]`。整句重念时严格维持 `Last-Take-Wins`。
    - **Mode B：无讲稿意图视窗仲裁模式（未提供讲稿时）**：剔除未完成残句重录（Abandoned Fragment），同时保护刻意修辞排比强调。
    - **由右至左跨镜区间遮罩 (`resolve_composite_prefix_occlusions`)**：当讲者仅局部补录后半句（`Take 1: A + B1 + C_ng`、`Take 2: B2 + C_ok`）时，以最新 `Take 2`（`composite_role="continuation"`）为基准，仅从上一镜 `Take 1` 回补未被覆盖的前缀 `A`（`composite_role="prefix"`，须满足 `is_viable_sub_span` 时长 `>= 0.55s`）。
-   - **局部小视窗精准重扫 (`edl_auditor.py`)**：检测遗漏段落、半句缺漏需前缀回补（`PARTIAL_SCRIPT_BLOCK_BACKFILL`）、跨片段句尾重讲（`TAIL_HEAD_RETAKE`）、单一片段内部重复（`INTRA_CLIP_REPEAT`）与多 Take 冲突（`SCRIPT_TAKE_COLLISION`），仅重扫该 `15s–90s` 局部视频视窗。
+   - **对齐后闭环验证与局部微视窗重扫 (`edl_auditor.py`)**：在清理 GCS 暂存视频前执行物理逐词对齐闭环检查，精准检测遗漏段落、半句缺漏（`PARTIAL_SCRIPT_BLOCK_BACKFILL`）、讲稿子句多重残留（`SCRIPT_PHRASE_MULTIPLICITY`，支持讲稿合法重复白名单）、物理 ASR 废词渗漏（`UNSCRIPTED_EXTRANEOUS_SPAN`）、跨片段句尾重讲（`TAIL_HEAD_RETAKE`）、单一片段内部重复（`INTRA_CLIP_REPEAT`）与多 Take 冲突（`SCRIPT_TAKE_COLLISION`），仅重扫该 `15s–90s` 局部视频视窗。
 3. **第三层：句中口误双区间挖除、多字词比例切分与邻词硬墙钳制 (`transcribe.py`)**：
    - 支持**句中口误挖除**（`_extract_matched_word_spans_by_transcript`），将 `[A + B_ng + B_ok + C]` 拆解为 `[A]` 与 `[B_ok + C]` 两个干净子单元；对中日韩多字词按字符比例插值（`_slice_words_on_char_span`），并对相邻未选废词施加 `0.001s` 硬墙钳制（`next_word_hard_wall` / `prev_word_hard_wall`）。
 4. **第四层：跨片段连贯小句无缝合一 (`coalesce_adjacent_sub_units`)**：
    - 当相邻片段为连续 `Sentence ID` 且物理字间距 `< 0.40s` 时自动合并，同时保护跨镜复合拼接切点（`is_composite_splice`）不被误合并。
 5. **第五层：物理时间轴确定性自愈与 8 维度双轨质量审计 (`edl_auditor.py`)**：
-   - 强制时间单调递增、在邻词硬墙上限内保护词尾塞音（`source_out >= t_last`）、合并 `< 0.45s` 闪帧微碎切，并生成包含 `asr_engine`、`composite_splices_count` 与 `agent_verdict` 质量门禁的 `_edl_report.md` 和 `_edl_report.json`。
+   - 强制时间单调递增、在邻词硬墙上限内保护词尾塞音（`source_out >= t_last`）、合并 `< 0.45s` 闪帧微碎切，并生成包含 `asr_engine`、`1_acoustic_lock`、`composite_splices_count` 与 `agent_verdict` 质量门禁的 `_edl_report.md` 和 `_edl_report.json`。
 6. **声学起音锁定、重叠切点同步、20 ms 微淡化与可选 1.12x 复合缩放遮瑕 (`acoustic.py` / `render.py`)**：
    - 修正停顿后虚胖起音（`clamp_post_pause_word_onset`）、在重叠词组的最低 RMS 能量谷同步切点（`find_optimal_overlap_pivot`）、匹配前后镜响度（`compute_composite_gain_db`），支持 Apple Silicon `VideoToolbox` 硬件加速、20 ms 等功率微淡化（`iqsin`/`qsin`）与可选 `--punch-in-composite`（`1.12x` 偶数像素裁剪放大遮瑕）。
 7. **Agent Plugins 1.0 标准架构与多平台 NLE 时间线导出 (`exporters.py`)**：
-   - 核心脚本与提示词位于 `skills/video-trimmer/scripts/`（含 `chirp3_asr.py`）与 `skills/video-trimmer/prompts/`（SSOT），支持导出带 `Composite Splice (Pick-up)` 时间线 `<marker>` 标记的 **FCP7 XML**、**FCPXML v1.9** 与 **CSV**，并通过全部 126 项离线单元测试。
+   - 核心脚本与提示词位于 `skills/video-trimmer/scripts/`（含 `chirp3_asr.py`）与 `skills/video-trimmer/prompts/`（SSOT），支持导出带 `Composite Splice (Pick-up)` 时间线 `<marker>` 标记的 **FCP7 XML**、**FCPXML v1.9** 与 **CSV**，并通过全部 152 项离线单元测试。
 
 ---
 

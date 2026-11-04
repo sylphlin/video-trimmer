@@ -22,7 +22,7 @@ from .constants import (
 )
 from .exceptions import GeminiAPIError
 from .gcs_utils import guess_mime_type, upload_file_to_gcs
-from .transcribe import format_whisper_transcript_for_prompt
+from .transcribe import format_asr_transcript_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -175,19 +175,22 @@ def format_script_blocks_for_prompt(script_content: str) -> str:
     return "\n".join(f"{b['label']} {b['raw_text']}" for b in blocks)
 
 
-def build_prompt(prompt_file_candidates, script_path=None, whisper_units=None):
+def build_prompt(prompt_file_candidates, script_path=None, whisper_units=None, script_text: str | None = None):
     """
     Assemble the complete Gemini prompt with Dual-Mode take arbitration rules.
 
     ASD-STE100:
-    Activate Mode A (Monotonic Script-Anchored Alignment) when script_path exists.
-    Activate Mode B (Unscripted Intent-Window Arbitration) when script_path is None.
+    Activate Mode A (Monotonic Script-Anchored Alignment) when script_text or script_path is provided.
+    Activate Mode B (Unscripted Intent-Window Arbitration) otherwise.
     """
     prompt = load_prompt_template(prompt_file_candidates)
 
-    if script_path is not None and script_path.exists():
-        script_content = script_path.read_text(encoding="utf-8")
-        formatted_blocks = format_script_blocks_for_prompt(script_content)
+    resolved_script = script_text
+    if resolved_script is None and script_path is not None and Path(script_path).exists():
+        resolved_script = Path(script_path).read_text(encoding="utf-8")
+
+    if resolved_script is not None:
+        formatted_blocks = format_script_blocks_for_prompt(resolved_script)
         prompt += (
             "\n\n---\n"
             "## Mode A: Monotonic Script-Anchored Take Arbitration (Active)\n"
@@ -213,7 +216,7 @@ def build_prompt(prompt_file_candidates, script_path=None, whisper_units=None):
         )
 
     if whisper_units:
-        prompt += format_whisper_transcript_for_prompt(whisper_units)
+        prompt += format_asr_transcript_for_prompt(whisper_units)
 
     return prompt
 
@@ -223,6 +226,7 @@ def build_micro_window_repair_prompt(
     whisper_units: list[dict],
     anomaly: dict,
     script_path=None,
+    script_text: str | None = None,
 ) -> str:
     """
     Build a surgical micro-window remediation prompt for a 15-to-90s video slice.
@@ -235,6 +239,7 @@ def build_micro_window_repair_prompt(
         prompt_file_candidates=prompt_file_candidates,
         script_path=script_path,
         whisper_units=whisper_units,
+        script_text=script_text,
     )
     blk_info = ""
     if anomaly.get("script_block"):
