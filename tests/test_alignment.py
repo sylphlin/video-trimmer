@@ -270,23 +270,23 @@ class TestAlignClipWithWhisper(unittest.TestCase):
         """Verify A + A + B intra-sentence repeat trims to the second A + B and preserves Gemini's corrected transcript."""
         words = [
             {"word": "研究者推測", "start": 100.0, "end": 101.5},
-            {"word": "BFI本來就是壓縮", "start": 101.5, "end": 103.8},
+            {"word": "資料本來就是壓縮", "start": 101.5, "end": 103.8},
             {"word": "研究者推測", "start": 104.0, "end": 105.5},
-            {"word": "BFI本來就是壓縮", "start": 105.5, "end": 107.8},
+            {"word": "資料本來就是壓縮", "start": 105.5, "end": 107.8},
             {"word": "後的資訊", "start": 107.8, "end": 109.5},
         ]
-        s15 = _sentence(15, 100.0, 109.5, "研究者推測BFI本來就是壓縮研究者推測BFI本來就是壓縮後的資訊", words)
+        s15 = _sentence(15, 100.0, 109.5, "研究者推測資料本來就是壓縮研究者推測資料本來就是壓縮後的資訊", words)
         clip = {
             "sentence_ids": [15],
-            "transcript": "研究者推測，BFI 本來就是壓縮後的資訊。",
-            "topic": "BFI Explanation",
+            "transcript": "研究者推測，資料本來就是壓縮後的資訊。",
+            "topic": "Compression Explanation",
         }
         sub_units = resolve_clip_sub_units([s15], clip, total_dur=120.0)
         assert len(sub_units) == 1
         assert sub_units[0]["t_first"] == pytest.approx(104.0, abs=0.02)
         assert sub_units[0]["t_last"] == pytest.approx(109.5, abs=0.02)
-        assert sub_units[0]["transcript"] == "研究者推測，BFI 本來就是壓縮後的資訊。"
-        assert sub_units[0]["whisper_transcript"] == "研究者推測BFI本來就是壓縮後的資訊"
+        assert sub_units[0]["transcript"] == "研究者推測，資料本來就是壓縮後的資訊。"
+        assert sub_units[0]["asr_transcript"] == "研究者推測資料本來就是壓縮後的資訊"
 
     def test_cjk_intra_token_proportional_interpolation_slices_multichar_word(self):
         """Interpolate word boundaries proportionally when a trim cut lands inside a multi-char CJK token."""
@@ -503,3 +503,77 @@ class TestAlignClipWithWhisper(unittest.TestCase):
         assert sub_units[0]["t_last"] == pytest.approx(13.10, abs=0.01)
         assert sub_units[0]["trimmed_tail"] is True
         assert sub_units[0]["next_word_hard_wall"] == pytest.approx(13.349, abs=0.005)
+
+    def test_leading_homophone_character_preserved_when_trailing_words_exist(self):
+        """Preserve a 1-char leading ASR homophone (盡 vs 儘) instead of clipping the opening syllable at offset 1."""
+        s1 = _sentence(
+            20,
+            60.00,
+            65.20,
+            "盡管如此這套架構依然具備極高的實務部署價值而且未來",
+            [
+                {"word": "盡", "start": 60.00, "end": 60.14},
+                {"word": "管如此這套架構依然具備極高的實務部署價值", "start": 60.14, "end": 64.20},
+                {"word": "而且未來", "start": 64.35, "end": 65.20},
+            ],
+        )
+        clip = {
+            "sentence_ids": [20],
+            "transcript": "儘管如此，這套架構依然具備極高的實務部署價值。",
+            "topic": "Leading Homophone Preservation",
+        }
+        sub_units = resolve_clip_sub_units([s1], clip, total_dur=80.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_first"] == pytest.approx(60.00, abs=0.01)
+        assert sub_units[0]["t_last"] == pytest.approx(64.20, abs=0.01)
+        assert sub_units[0]["trimmed_head"] is False
+        assert sub_units[0]["trimmed_tail"] is True
+
+    def test_multi_sentence_monotonic_alignment_excises_stutters_and_tail_stumbles(self):
+        """Partition transcript monotonically across 3 sentences to excise internal stutters and trailing stumbles."""
+        s1 = _sentence(
+            31,
+            100.00,
+            104.80,
+            "系統會將感測數據回傳給主機也就是說我們",
+            [
+                {"word": "系統會將感測數據回傳給主機", "start": 100.00, "end": 103.60},
+                {"word": "也就是說我們", "start": 103.75, "end": 104.80},
+            ],
+        )
+        s2 = _sentence(
+            32,
+            105.30,
+            111.50,
+            "也就是說也就是說我們的終端設備會公開廣播摘要任何人在範圍",
+            [
+                {"word": "也就是說", "start": 105.30, "end": 105.90},
+                {"word": "也就是說我們的終端設備會公開廣播摘要", "start": 106.05, "end": 110.20},
+                {"word": "任何人在範圍", "start": 110.35, "end": 111.50},
+            ],
+        )
+        s3 = _sentence(
+            33,
+            112.00,
+            115.60,
+            "任何人在範圍內接收封包就能完成解析。",
+            [
+                {"word": "任何人在範圍內接收封包就能完成解析。", "start": 112.00, "end": 115.60},
+            ],
+        )
+        clip = {
+            "sentence_ids": [31, 32, 33],
+            "transcript": "系統會將感測數據回傳給主機。也就是說，我們的終端設備會公開廣播摘要，任何人在範圍內接收封包就能完成解析。",
+            "topic": "Multi-Sentence Stutter and Stumble Excision",
+        }
+        sub_units = resolve_clip_sub_units([s1, s2, s3], clip, total_dur=130.0)
+        assert len(sub_units) == 3
+        assert sub_units[0]["t_first"] == pytest.approx(100.00, abs=0.01)
+        assert sub_units[0]["t_last"] == pytest.approx(103.60, abs=0.01)
+        assert sub_units[0]["next_word_hard_wall"] == pytest.approx(103.749, abs=0.005)
+        assert sub_units[1]["t_first"] == pytest.approx(106.05, abs=0.01)
+        assert sub_units[1]["t_last"] == pytest.approx(110.20, abs=0.01)
+        assert sub_units[1]["next_word_hard_wall"] == pytest.approx(110.349, abs=0.005)
+        assert sub_units[2]["t_first"] == pytest.approx(112.00, abs=0.01)
+        assert sub_units[2]["t_last"] == pytest.approx(115.60, abs=0.01)
+

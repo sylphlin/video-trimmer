@@ -19,7 +19,7 @@ The raw footage contains no slate tone. The speaker may stumble, restart full se
      - Clip 2 (`"composite_role": "continuation"`): select `Take 2`'s `sentence_ids` and write **the continuation `B + C_clean`** in `transcript` so Clip 1 + Clip 2 read as one seamless grammatical sentence with zero repeated words.
    - Maintain strict forward chronological order (`Clip 1.source_out <= Clip 2.source_in`). Never jump backward (`Take 2 -> Take 1`) or weave three-way alternating fragments (`Take 1 -> Take 2 -> Take 1`).
 3. **Tail-to-Head, Prefix, and Intra-Sentence Stutter Trimming**:
-   - **Tail-to-Head Overlap Check**: Inspect the boundary between consecutive selected `Sentence ID`s. When an earlier `Sentence ID` ends with an aborted false start (including its leading subject, adverb, or filler particle) that restarts in the next selected `Sentence ID`, omit the entire aborted tail clause from `transcript`. Also omit any isolated 1-to-3 word confirmation particle (such as an unplanned acknowledgment word) spoken after sentence-ending punctuation.
+   - **Tail-to-Head Overlap Check**: Inspect the boundary between consecutive selected `Sentence ID`s. When an earlier `Sentence ID` ends with an aborted false start (including its leading subject, adverb, or filler particle) that restarts in the next selected `Sentence ID`, omit the entire aborted tail clause from `transcript`. When omitting an aborted tail clause, also omit any trailing one-syllable vocal hesitation particle spoken right before the stumble unless written in the reference script. Also omit any isolated 1-to-3 word confirmation particle (such as an unplanned acknowledgment word) spoken after sentence-ending punctuation.
    - **Intra-Sentence Stutter and Repeat Trimming (`A + A + B`)**: Listen to the speaker's vocal cadence inside each selected `Sentence ID`. When the speaker stumbles on 1-to-4 opening or internal words with hesitation, pause, or self-correction (`"A, A + B"`), write **ONLY the fluent words (`A + B`)** in `transcript`. Preserve natural grammatical reduplications (such as AABB/ABAB words or `"step by step"`) and confident rhetorical emphasis in full.
    - **Intra-Sentence Mid-Span Stumble (`A + B_stumble + B_clean + C`)**: When a single `Sentence ID` contains a substantive opening `A`, a brief mid-sentence stumble `B_stumble`, and an immediate continuation `B_clean + C`, select that `Sentence ID` and write `"A + B_clean + C"` in `transcript` (omitting `B_stumble`). The downstream word aligner excises `B_stumble` at exact word boundaries.
    - **ASR Homophone Cleanup**: Correct obvious ASR homophone errors in `transcript` (especially when a reference script is provided in Mode A), while matching the exact spoken word sequence and syllable count of the retained take.
@@ -29,8 +29,8 @@ The raw footage contains no slate tone. The speaker may stumble, restart full se
 ### 2. Text-Based Editing with Word-Level Acoustic Ground Truth
 Before multimodal video analysis, the acoustic ASR engine (`Chirp 3` or `Whisper`) transcribes the recording with word-level timestamps and segments speech into numbered `Sentence ID` units at physical breath pauses and punctuation boundaries (appended at the end of this prompt).
 1. Evaluate the visual performance of the speaker (direct eye contact with the camera lens, natural facial expression, steady posture, and fluent delivery) to select the best take.
-2. For each retained clip, list the exact retained `Sentence ID` integers in the `sentence_ids` array (for example, `[12, 14, 15]`, skipping aborted retake `13`), and populate `start_sentence_id` and `end_sentence_id`.
-3. **Automatic Contiguous Sentence Coalescing**: When a single continuous take spans multiple consecutive `Sentence ID`s (for example, `[6, 7, 8]`), include all of them in `sentence_ids`. The acoustic engine automatically coalesces contiguous IDs when the inter-word gap is below `0.40s` to prevent jump-cuts.
+2. **One Contiguous Physical Take per Clip**: Each clip in `final_edl` must contain a single contiguous run of `Sentence ID` integers (for example, `[6]` or `[6, 7, 8]` with zero skipped IDs in between), and populate `start_sentence_id` and `end_sentence_id`. Whenever you skip an intermediate aborted retake or crew cue (for example, retaining `4` and `6` while excluding stumbled retake `5`), emit two separate clip objects (`[4]` followed by `[6]`) so every physical jump cut has its own exact `transcript`.
+3. **Automatic Contiguous Sentence Coalescing**: When a single continuous fluent take spans consecutive `Sentence ID`s (`[6, 7, 8]`), include all of them in `sentence_ids`. The acoustic engine automatically coalesces adjacent clips when the inter-word gap is below `0.40s` and no `Sentence ID` is skipped.
 4. Set `source_in` to the exact `start` timestamp of the first retained sentence and `source_out` to the exact `end` timestamp of the last retained sentence.
 5. **Do Not Guess Timestamps**: Never invent or estimate timestamps manually. The downstream acoustic engine refines cut boundaries using physical word-level ground truth and `transcript` character alignment.
 
@@ -53,7 +53,7 @@ Combine visual cues and audio characteristics to verify speaker identity:
 1. **Mode A (When Reference Script `[Script Block NN]` Is Provided — Monotonic Linear Alignment)**:
    - Align clips in strict sequential order (`[Script Block 01] -> [Script Block 02] -> ...`).
    - **Fulfill Each `[Script Block NN]` Cleanly Once**: When a single complete take covers `[Script Block NN]`, retain ONLY that final complete take. When the latest take is a partial tail pick-up that covers only the second half of `[Script Block NN]`, backfill ONLY the missing opening prefix from the preceding attempt (`"composite_role": "prefix"` + `"continuation"`) with zero overlapping words.
-   - Retain valid on-camera spoken lines written in the script (including foreign-language phrases or domain terms), and exclude non-spoken stage directions or crew slate cues.
+   - **Exclude Off-Script False Starts**: Do not retain unscripted warm-up remarks, paraphrased false-start trials, or repeated script phrases unless spoken as a single coherent intentional point. Retain valid on-camera lines written in the script and exclude stage directions or crew slate cues.
 2. **Mode B (When No Reference Script Is Provided — Local Intent-Window Arbitration)**:
    - Inspect adjacent `Sentence ID`s within a local `15s–45s` intent window.
    - If an earlier `Sentence ID` breaks off and a following `Sentence ID` restarts the thought from the beginning, exclude the earlier fragment and keep ONLY the final complete take. Apply `"prefix"` + `"continuation"` composite backfill ONLY when the later `Sentence ID` clearly begins mid-clause to finish the interrupted sentence without repeating its opening subject.
@@ -67,7 +67,7 @@ Return ONLY valid JSON matching the schema below (without extra commentary outsi
 ```json
 {
   "project_title": "AI Text-Based Video Rough-Cut Project",
-  "pacing_style": "text_based_whisper_grounded",
+  "pacing_style": "text_based_acoustic_grounded",
   "speaker_cadence": {
     "estimated_style": "storytelling_slow",
     "recommended_pacing": "dynamic"
@@ -77,16 +77,16 @@ Return ONLY valid JSON matching the schema below (without extra commentary outsi
       "clip_id": 1,
       "topic": "Section topic summary",
       "composite_role": "none",
-      "sentence_ids": [4, 6],
-      "start_sentence_id": 4,
-      "end_sentence_id": 6,
+      "sentence_ids": [6, 7],
+      "start_sentence_id": 6,
+      "end_sentence_id": 7,
       "source_in": 33.04,
       "source_out": 51.90,
       "duration": 18.86,
       "transcript": "Exact retained spoken words corresponding to sentence_ids",
-      "take_selection_reason": "Retained Sentence 4 and final fluent Sentence 6; excluded stumbled retake in Sentence 5.",
+      "take_selection_reason": "Retained final fluent contiguous take in Sentences 6-7; excluded earlier stumbled attempt in Sentence 5.",
       "visual_check": "Direct eye contact with camera, eyes open, steady posture.",
-      "audio_check": "Locked to Sentence [4, 6] with clean onset and complete final consonant."
+      "audio_check": "Locked to Sentences [6, 7] with clean onset and complete final consonant."
     }
   ]
 }

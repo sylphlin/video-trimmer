@@ -145,7 +145,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--stt-location` | | `us` | Cloud Speech-to-Text V2 location for Chirp 3 (defaults to `$STT_LOCATION` or `us`). |
 | `--whisper-model` | | `small` | Whisper model size when `--asr-engine whisper` is selected. |
 | `--language` | | `auto` | Spoken language code (`auto`, `zh-TW`, `zh-CN`, `en`, `ja`, `ko`). |
-| `--force` | | `False` | Bypass cached `<basename>_whisper_raw.json` and force re-transcription. |
+| `--force` | | `False` | Bypass cached `<basename>_words.json` and force re-transcription. |
 | `--model` | `-m` | `gemini-3.8-flash` | Gemini model name (defaults to `$MODEL_NAME` or `gemini-3.8-flash`). |
 | `--project` | | `None` | Google Cloud Project ID (defaults to `$GOOGLE_CLOUD_PROJECT` or ADC). |
 | `--region` | | `None` | Vertex AI location/region (defaults to `$GOOGLE_CLOUD_LOCATION` or `global`). |
@@ -170,11 +170,12 @@ For an input file `raw_footage.mp4`, the skill isolates all generated files insi
 1. `output/raw_footage_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 20ms micro-fades, composite loudness matching, and optional `1.12x` composite punch-in.
 2. `output/raw_footage_<suffix>_edl.xml`: Final Cut Pro 7 XML timeline for **Premiere Pro** & **DaVinci Resolve** (with composite splice markers).
 3. `output/raw_footage_<suffix>_edl.fcpxml`: FCPXML v1.9 timeline for **Final Cut Pro** (with DTD-valid `<adjust-transform>` and `<marker>` elements).
-4. `output/raw_footage_<suffix>_edl.json`: Structured decision metadata with `asr_engine`, `agent_verdict`, composite splice roles, CPS, and margins.
+4. `output/raw_footage_<suffix>_edl.json`: Structured decision metadata with `asr_engine`, `asr_transcript`, `agent_verdict`, composite splice roles, CPS, and margins.
 5. `output/raw_footage_<suffix>_edl.csv`: Spreadsheet table with visual/audio validation notes.
 6. `output/raw_footage_<suffix>_edl_report.md`: 8-dimension human-readable rough-cut quality audit report.
-7. `output/raw_footage_<suffix>_edl_report.json`: Machine-readable audit report with top-level `agent_verdict` and `composite_splices_count`.
-8. `output/raw_footage_whisper_raw.json`: Engine-tagged word-level ground-truth transcript cache (`chirp3` or `whisper`).
+7. `output/raw_footage_<suffix>_edl_report.json`: Machine-readable audit report with top-level `agent_verdict` (`1_acoustic_lock`) and `composite_splices_count`.
+8. `output/raw_footage_words.json`: Engine-tagged word-level acoustic ground-truth cache (`chirp3` or `whisper`).
+9. `output/raw_footage_sentences.json`: Clause-segmented `Sentence ID` candidate index derived from physical acoustic boundaries.
 
 ---
 

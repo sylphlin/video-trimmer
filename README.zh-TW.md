@@ -34,8 +34,8 @@ flowchart TD
 
     subgraph L1["Layer 1: 雙引擎純聲學與標點子句切分 (chirp3_asr / transcribe)"]
         W_ASR["雙引擎逐字聲學轉錄<br/>(預設: Cloud STT V2 Chirp 3 0.001s | 選用: Whisper)"]:::stage1Style
-        S_SEG["物理邊界 Sentence ID 切分<br/>(換氣停頓 >=0.20s、拉長音、標點與連詞黏合)"]:::stage1Style
-        W_JSON["中繼產物: <basename>_whisper_raw.json<br/>(含 asr_engine 標記之聲學基準與候選句索引)"]:::artifactStyle
+        S_SEG["物理邊界 Sentence ID 切分<br/>(換氣停頓 >=0.20s、拉長音與通用標點邊界)"]:::stage1Style
+        W_JSON["中繼產物: <basename>_words.json 與 _sentences.json<br/>(含 asr_engine 標記之聲學基準與候選句索引)"]:::artifactStyle
         W_ASR --> S_SEG --> W_JSON
     end
 
@@ -256,8 +256,8 @@ chmod +x setup.sh
 2. **`<basename>_<tag>_edl.xml`**：適用於 **Adobe Premiere Pro** 與 **DaVinci Resolve** 的 Final Cut Pro 7 XML 時間軸（含 `Composite Splice` 標記）。
 3. **`<basename>_<tag>_edl.fcpxml`**：適用於 **Apple Final Cut Pro** 的 FCPXML v1.9 時間軸（含 `Composite Splice` 標記）。
 4. **`<basename>_<tag>_edl.json`** / **`<basename>_<tag>_edl.csv`**：結構化剪輯決策資料與試算表剪輯清單。
-5. **`<basename>_<tag>_edl_report.md`** / **`.json`**：8 維度粗剪品質審計報告（含 `asr_engine`、`composite_splices_count` 與 `agent_verdict` 品質閘門結果）。
-6. **`<basename>_whisper_raw.json`**：標記轉錄引擎（`chirp3` 或 `whisper`）之毫秒級逐字聲學快取。
+5. **`<basename>_<tag>_edl_report.md`** / **`.json`**：8 維度粗剪品質審計報告（含 `asr_engine`、`1_acoustic_lock`、`composite_splices_count` 與 `agent_verdict` 品質閘門結果）。
+6. **`<basename>_words.json`** 與 **`<basename>_sentences.json`**：標記轉錄引擎（`chirp3` 或 `whisper`）之毫秒級逐字聲學快取與子句切分 `Sentence ID` 候選索引。
 
 ---
 
@@ -272,7 +272,7 @@ chmod +x setup.sh
 
 ## 單元測試 (Unit Testing)
 
-提交變更前請執行完整離線單元測試套件（126 項測試）：
+提交變更前請執行完整離線單元測試套件（149 項測試）：
 
 ```bash
 python3 -m unittest discover -s tests -v

@@ -206,3 +206,44 @@ class TestMergeWhisperSegmentsToSentences(unittest.TestCase):
         sentences = merge_whisper_segments_to_sentences(segs)
         assert len(sentences) == 1
         assert "CSI" in sentences[0]["text"]
+
+    def test_comma_absorbed_pause_splits_clause_at_zero_interword_gap(self):
+        """Split a clause comma when the comma token itself absorbs the >= 0.22s pause at zero inter-word gap."""
+        words = [
+            {"word": "第一階段", "start": 0.00, "end": 0.60},
+            {"word": "完成採集,", "start": 0.60, "end": 1.60},
+            {"word": "並透過", "start": 1.60, "end": 2.05},
+        ]
+        segs = [_seg(1, 0.00, 2.05, "第一階段完成採集,並透過", words=words)]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert len(sentences) == 2
+        assert sentences[0]["text"] == "第一階段完成採集,"
+        assert sentences[1]["text"] == "並透過"
+
+    def test_pre_boundary_hesitation_drag_splits_stutter_without_breaking_zero_gap_reduplication(self):
+        """Split a stretched final hesitation syllable (>= 0.275s/char + >= 0.035s gap) while keeping zero-gap reduplication intact."""
+        stutter_words = [
+            {"word": "例", "start": 10.00, "end": 10.12},
+            {"word": "如", "start": 10.12, "end": 10.24},
+            {"word": "你", "start": 10.24, "end": 10.56},
+            {"word": "例", "start": 10.62, "end": 10.74},
+            {"word": "如", "start": 10.74, "end": 10.86},
+            {"word": "你", "start": 10.86, "end": 11.00},
+            {"word": "攜帶裝置進入測試區。", "start": 11.00, "end": 12.20},
+        ]
+        stutter_segs = [_seg(1, 10.00, 12.20, "例如你例如你攜帶裝置進入測試區。", words=stutter_words)]
+        stutter_sentences = merge_whisper_segments_to_sentences(stutter_segs)
+        assert len(stutter_sentences) == 2
+        assert stutter_sentences[0]["text"] == "例如你"
+        assert stutter_sentences[1]["text"] == "例如你攜帶裝置進入測試區。"
+
+        redup_words = [
+            {"word": "請大家", "start": 20.00, "end": 20.45},
+            {"word": "仔", "start": 20.45, "end": 20.78},
+            {"word": "仔", "start": 20.78, "end": 20.92},
+            {"word": "細細觀察數據變化。", "start": 20.92, "end": 22.10},
+        ]
+        redup_segs = [_seg(1, 20.00, 22.10, "請大家仔仔細細觀察數據變化。", words=redup_words)]
+        redup_sentences = merge_whisper_segments_to_sentences(redup_segs)
+        assert len(redup_sentences) == 1
+

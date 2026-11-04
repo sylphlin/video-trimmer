@@ -271,6 +271,16 @@ def build_micro_window_repair_prompt(
             "- Partial Script Block Backfill Resolution: The latest selected take covers only the second half of the target `[Script Block NN]`. "
             "Inspect the preceding candidate sentences in this window, backfill ONLY the missing opening clause as `\"composite_role\": \"prefix\"` with clean `transcript` trimming, and keep the final continuation take as `\"composite_role\": \"continuation\"` with zero overlapping words."
         )
+    if "SCRIPT_PHRASE_MULTIPLICITY" in sub_types:
+        guidance_lines.append(
+            "- Duplicate Script Phrase Resolution: Multiple clips in this window repeat a script phrase that appears only once in the reference script. "
+            "Retain ONLY the final fluent take (`Last Take Wins`) or trim the overlapping words from the earlier clip's `transcript` so each script phrase is spoken once."
+        )
+    if "UNSCRIPTED_EXTRANEOUS_SPAN" in sub_types:
+        guidance_lines.append(
+            "- Unscripted Extraneous Span Check: A clip in this window contains spoken words absent from the reference script or untrimmed ASR words outside `transcript`. "
+            "Listen carefully: omit off-script false starts, crew remarks, or paraphrased NG trials, and retain ONLY intentional fluent statements."
+        )
     type_guidance = ("\n".join(guidance_lines) + "\n") if guidance_lines else ""
 
     directive = (
@@ -281,11 +291,67 @@ def build_micro_window_repair_prompt(
         f"{blk_info}"
         f"{type_guidance}"
         "- Inspect only the candidate `Sentence ID`s listed above within this short video window.\n"
+        "- Each clip object must contain a contiguous run of `Sentence ID`s with zero skipped IDs.\n"
         "- Populate `sentence_ids`, `start_sentence_id`, `end_sentence_id`, `composite_role`, and the clean `transcript` for the winning take(s).\n"
         "- Exclude all earlier false starts, stumbles, or duplicate retakes while preserving fluent intentional rhetoric.\n"
     )
     return base_prompt + directive
 
+
+EDL_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "project_title": {"type": "STRING"},
+        "pacing_style": {"type": "STRING"},
+        "speaker_cadence": {
+            "type": "OBJECT",
+            "properties": {
+                "estimated_style": {"type": "STRING"},
+                "recommended_pacing": {"type": "STRING"},
+            },
+        },
+        "final_edl": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "clip_id": {"type": "INTEGER"},
+                    "topic": {"type": "STRING"},
+                    "composite_role": {
+                        "type": "STRING",
+                        "enum": ["none", "prefix", "continuation"],
+                    },
+                    "sentence_ids": {
+                        "type": "ARRAY",
+                        "items": {"type": "INTEGER"},
+                    },
+                    "start_sentence_id": {"type": "INTEGER"},
+                    "end_sentence_id": {"type": "INTEGER"},
+                    "source_in": {"type": "NUMBER"},
+                    "source_out": {"type": "NUMBER"},
+                    "duration": {"type": "NUMBER"},
+                    "transcript": {"type": "STRING"},
+                    "take_selection_reason": {"type": "STRING"},
+                    "visual_check": {"type": "STRING"},
+                    "audio_check": {"type": "STRING"},
+                },
+                "required": [
+                    "clip_id",
+                    "topic",
+                    "composite_role",
+                    "sentence_ids",
+                    "source_in",
+                    "source_out",
+                    "transcript",
+                    "take_selection_reason",
+                    "visual_check",
+                    "audio_check",
+                ],
+            },
+        },
+    },
+    "required": ["final_edl"],
+}
 
 
 def _extract_text_from_response(response) -> str:
@@ -353,7 +419,7 @@ def calculate_dynamic_thinking_budget(num_sentences: int, video_duration_seconds
     It balances decision requirements with the 300-second network deadline.
 
     Args:
-        num_sentences: Total count of Whisper transcript sentences.
+        num_sentences: Total count of ASR transcript sentences.
         video_duration_seconds: Total duration of the video input in seconds.
 
     Returns:
@@ -394,7 +460,7 @@ def merge_chunked_edl(chunk_edl_results: list[dict], project_title: str) -> dict
 
     return {
         "project_title": project_title,
-        "pacing_style": "text_based_whisper_grounded",
+        "pacing_style": "text_based_acoustic_grounded",
         "final_edl": merged_clips,
     }
 
@@ -442,6 +508,7 @@ def run_gemini_inference(
 
     config_kwargs = {
         "response_mime_type": "application/json",
+        "response_schema": EDL_RESPONSE_SCHEMA,
         "temperature": 0.0,
         "max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
     }

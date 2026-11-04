@@ -34,8 +34,8 @@ flowchart TD
 
     subgraph L1["Layer 1: デュアルエンジン音響・句読点分割 (chirp3_asr / transcribe)"]
         W_ASR["デュアルエンジン単語レベル ASR<br/>(標準: Cloud STT V2 Chirp 3 0.001s | 任意: Whisper)"]:::stage1Style
-        S_SEG["物理境界による Sentence ID 分割<br/>(息継ぎ >=0.20s、長音化、句読点、接続詞結合)"]:::stage1Style
-        W_JSON["中間アーティファクト: <basename>_whisper_raw.json<br/>(asr_engine タグ付き音響タイムスタンプ＆文インデックス)"]:::artifactStyle
+        S_SEG["物理境界による Sentence ID 分割<br/>(息継ぎ >=0.20s、長音化、汎用句読点境界)"]:::stage1Style
+        W_JSON["中間アーティファクト: <basename>_words.json & _sentences.json<br/>(asr_engine タグ付き音響タイムスタンプ＆文インデックス)"]:::artifactStyle
         W_ASR --> S_SEG --> W_JSON
     end
 

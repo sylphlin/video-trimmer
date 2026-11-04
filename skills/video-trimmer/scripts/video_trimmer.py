@@ -53,7 +53,9 @@ from .constants import (
 from .edl_auditor import (
     audit_edl_quality,
     deduplicate_and_sort_clips,
+    detect_micro_window_anomalies,
     generate_edl_audit_markdown,
+    occlude_expanded_sub_units,
     repair_edl_micro_windows,
     sanitize_refined_edl,
 )
@@ -90,13 +92,31 @@ def _parse_gemini_json_text(raw_json: str) -> dict:
         cleaned = cleaned.split("```json")[1].split("```")[0].strip()
     elif "```" in cleaned:
         cleaned = cleaned.split("```")[1].split("```")[0].strip()
-    elif not cleaned.startswith("{") and "{" in cleaned:
-        start_idx = cleaned.find("{")
-        end_idx = cleaned.rfind("}")
-        if start_idx != -1 and end_idx != -1:
-            cleaned = cleaned[start_idx : end_idx + 1].strip()
+    elif not cleaned.startswith("{") and not cleaned.startswith("["):
+        brace_idx = cleaned.find("{")
+        bracket_idx = cleaned.find("[")
+        candidates = [i for i in (brace_idx, bracket_idx) if i != -1]
+        if candidates:
+            start_idx = min(candidates)
+            end_brace = cleaned.rfind("}")
+            end_bracket = cleaned.rfind("]")
+            end_idx = max(end_brace, end_bracket)
+            if end_idx > start_idx:
+                cleaned = cleaned[start_idx : end_idx + 1].strip()
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            return {"final_edl": parsed}
+        return parsed
+    except json.JSONDecodeError as e:
+        if "Extra data" in str(e) and cleaned.startswith("{") and cleaned.endswith("}"):
+            try:
+                wrapped = json.loads(f"[{cleaned}]")
+                if isinstance(wrapped, list) and all(isinstance(x, dict) for x in wrapped):
+                    return {"final_edl": wrapped}
+            except Exception:
+                pass
+        raise VideoTrimmerError(f"Failed to parse Gemini JSON response: {e}\nRaw output:\n{cleaned}") from e
     except Exception as e:
         raise VideoTrimmerError(f"Failed to parse Gemini JSON response: {e}\nRaw output:\n{cleaned}") from e
 
@@ -229,7 +249,8 @@ def _synchronize_composite_overlap_pivots(filtered_units: list[dict], audio, sr:
             prev_su["next_sentence_start"] = min(float(prev_next), cut_word_start) if prev_next is not None else cut_word_start
             prev_su["next_word_hard_wall"] = prev_su["next_sentence_start"]
             prev_su["trimmed_tail"] = True
-            prev_su["whisper_transcript"] = new_pref_text
+            prev_su["asr_transcript"] = new_pref_text
+            prev_su.pop("whisper_transcript", None)
             prev_su["transcript"] = _trim_transcript_tail_to_words(prev_su.get("transcript", ""), new_pref_words)
 
         if cont_start > 0:
@@ -240,8 +261,94 @@ def _synchronize_composite_overlap_pivots(filtered_units: list[dict], audio, sr:
             curr_prev = curr_su.get("prev_sentence_end")
             curr_su["prev_sentence_end"] = max(float(curr_prev), cut_prev_end) if curr_prev is not None else cut_prev_end
             curr_su["trimmed_head"] = True
-            curr_su["whisper_transcript"] = new_cont_text
+            curr_su["asr_transcript"] = new_cont_text
+            curr_su.pop("whisper_transcript", None)
             curr_su["transcript"] = _trim_transcript_head_to_words(curr_su.get("transcript", ""), new_cont_words)
+
+
+def _expand_and_occlude_edl_clips(
+    model_edl: dict,
+    whisper_units: list[dict],
+    total_dur: float,
+    script_text: str | None = None,
+) -> list[dict]:
+    """
+    Execute deterministic Layer 3 & Layer 4 sub-unit word alignment, occlusion, and coalescing.
+
+    ASD-STE100:
+    1. Deduplicate and sort LLM clips with composite seam occlusion.
+    2. Expand clips to physical word sub-units, occlude residual stumbles, and coalesce continuous spans.
+    """
+    clips = [dict(c) for c in model_edl.get("final_edl", [])] if isinstance(model_edl, dict) else []
+    if whisper_units and clips:
+        clips = deduplicate_and_sort_clips(
+            clips=clips,
+            whisper_units=whisper_units,
+            script_text=script_text,
+        )
+
+    expanded_units = []
+    for c in clips:
+        sub_units = resolve_clip_sub_units(whisper_units, c, total_dur)
+        base_topic = str(c.get("topic") or f"Clip {c.get('clip_id', 1)}")
+        for idx, su in enumerate(sub_units):
+            topic_label = base_topic if len(sub_units) == 1 else f"{base_topic} (#{idx + 1})"
+            asr_tr = su.get("asr_transcript") or su.get("whisper_transcript") or su["transcript"]
+            expanded_units.append({
+                "parent_clip": c,
+                "topic": topic_label,
+                "sentence_ids": su.get("sentence_ids", []),
+                "t_first": su["t_first"],
+                "t_last": su["t_last"],
+                "prev_sentence_end": su["prev_sentence_end"],
+                "next_sentence_start": su["next_sentence_start"],
+                "next_word_hard_wall": su.get("next_word_hard_wall"),
+                "words": list(su.get("words") or []),
+                "transcript": su["transcript"],
+                "asr_transcript": asr_tr,
+                "trimmed_head": su.get("trimmed_head", False),
+                "trimmed_tail": su.get("trimmed_tail", False),
+                "composite_role": su.get("composite_role", "none"),
+                "is_composite_splice": bool(su.get("is_composite_splice", False)),
+                "llm_verified_window": bool(su.get("llm_verified_window", False)),
+            })
+
+    expanded_units = occlude_expanded_sub_units(expanded_units, script_text=script_text)
+    filtered_units = coalesce_adjacent_sub_units(expanded_units)
+    filtered_units = occlude_expanded_sub_units(filtered_units, script_text=script_text)
+    return filtered_units
+
+
+def _sub_units_to_aligned_edl(model_edl: dict, filtered_units: list[dict]) -> dict:
+    """Convert aligned Layer 3/4 sub-units into an EDL dictionary for closed-loop verification."""
+    aligned_clips = []
+    for seq_id, su in enumerate(filtered_units, start=1):
+        parent = su.get("parent_clip") or {}
+        sids = list(su.get("sentence_ids") or [])
+        aligned_clips.append({
+            "clip_id": seq_id,
+            "topic": su.get("topic", parent.get("topic", f"Clip {seq_id}")),
+            "sentence_ids": sids,
+            "start_sentence_id": sids[0] if sids else parent.get("start_sentence_id"),
+            "end_sentence_id": sids[-1] if sids else parent.get("end_sentence_id"),
+            "t_first": su["t_first"],
+            "t_last": su["t_last"],
+            "source_in": su["t_first"],
+            "source_out": su["t_last"],
+            "transcript": su["transcript"],
+            "asr_transcript": su.get("asr_transcript") or su["transcript"],
+            "trimmed_head": bool(su.get("trimmed_head", False)),
+            "trimmed_tail": bool(su.get("trimmed_tail", False)),
+            "composite_role": su.get("composite_role", "none"),
+            "is_composite_splice": bool(su.get("is_composite_splice", False)),
+            "llm_verified_window": bool(su.get("llm_verified_window", False)),
+            "take_selection_reason": parent.get("take_selection_reason", ""),
+            "visual_check": parent.get("visual_check", "Direct eye contact with camera, eyes open."),
+            "audio_check": parent.get("audio_check", ""),
+        })
+    out_edl = dict(model_edl) if isinstance(model_edl, dict) else {}
+    out_edl["final_edl"] = aligned_clips
+    return out_edl
 
 
 def _run(args):
@@ -294,7 +401,7 @@ def _run(args):
     whisper_sentences = []
 
     if not args.skip_whisper:
-        whisper_json = out_dir / f"{base_name}_whisper_raw.json"
+        words_json = out_dir / f"{base_name}_words.json"
         asr_label = (
             f"Chirp 3 (Cloud STT V2, {resolved_stt_location})"
             if args.asr_engine == "chirp3"
@@ -303,7 +410,7 @@ def _run(args):
         logger.info("==> 2. Running %s word-level transcription and clause segmentation...", asr_label)
         whisper_segs, whisper_sentences = transcribe_video_words(
             video_path=video_path,
-            out_json_path=whisper_json,
+            out_json_path=words_json,
             asr_engine=args.asr_engine,
             whisper_model=args.whisper_model,
             language=args.language,
@@ -461,6 +568,34 @@ def _run(args):
                     run_window_inference_fn=_run_window_repair,
                     script_text=script_text,
                 )
+
+                # Step 4c: Closed-Loop Post-Alignment Verification (inspect physical asr_transcript words before GCS cleanup)
+                preview_units = _expand_and_occlude_edl_clips(
+                    model_edl=model_edl,
+                    whisper_units=whisper_units,
+                    total_dur=total_dur,
+                    script_text=script_text,
+                )
+                aligned_edl = _sub_units_to_aligned_edl(model_edl, preview_units)
+                post_align_anomalies = detect_micro_window_anomalies(
+                    model_edl=aligned_edl,
+                    whisper_units=whisper_units,
+                    total_dur=total_dur,
+                    script_text=script_text,
+                )
+                if post_align_anomalies:
+                    logger.info(
+                        "    [Closed-Loop Verification] Detected %d post-alignment anomaly window(s); running targeted repair before GCS cleanup...",
+                        len(post_align_anomalies),
+                    )
+                    model_edl, post_repairs = repair_edl_micro_windows(
+                        model_edl=aligned_edl,
+                        whisper_units=whisper_units,
+                        total_dur=total_dur,
+                        run_window_inference_fn=_run_window_repair,
+                        script_text=script_text,
+                    )
+                    micro_window_repairs.extend(post_repairs)
         finally:
             if is_ephemeral and not args.keep_gcs_upload:
                 delete_gcs_blob(gcs_uri)
@@ -492,39 +627,12 @@ def _run(args):
     audio, sr = sf.read(str(temp_wav))
 
     try:
-        if whisper_units and isinstance(model_edl, dict) and model_edl.get("final_edl"):
-            model_edl["final_edl"] = deduplicate_and_sort_clips(
-                clips=model_edl["final_edl"],
-                whisper_units=whisper_units,
-                script_text=script_text,
-            )
-
-        expanded_units = []
-        for c in model_edl.get("final_edl", []):
-            sub_units = resolve_clip_sub_units(whisper_units, c, total_dur)
-            for idx, su in enumerate(sub_units):
-                topic_label = c["topic"] if len(sub_units) == 1 else f"{c['topic']} (#{idx + 1})"
-                expanded_units.append({
-                    "parent_clip": c,
-                    "topic": topic_label,
-                    "sentence_ids": su.get("sentence_ids", []),
-                    "t_first": su["t_first"],
-                    "t_last": su["t_last"],
-                    "prev_sentence_end": su["prev_sentence_end"],
-                    "next_sentence_start": su["next_sentence_start"],
-                    "next_word_hard_wall": su.get("next_word_hard_wall"),
-                    "words": list(su.get("words") or []),
-                    "transcript": su["transcript"],
-                    "whisper_transcript": su.get("whisper_transcript", su["transcript"]),
-                    "trimmed_head": su.get("trimmed_head", False),
-                    "trimmed_tail": su.get("trimmed_tail", False),
-                    "composite_role": su.get("composite_role", "none"),
-                    "is_composite_splice": bool(su.get("is_composite_splice", False)),
-                    "llm_verified_window": bool(su.get("llm_verified_window", False)),
-                })
-
-        # Coalesce adjacent continuous sub-units across clip boundaries when gap < 0.40s and no ID is skipped
-        filtered_units = coalesce_adjacent_sub_units(expanded_units)
+        filtered_units = _expand_and_occlude_edl_clips(
+            model_edl=model_edl,
+            whisper_units=whisper_units,
+            total_dur=total_dur,
+            script_text=script_text,
+        )
 
         # Synchronize shared overlap pivots across composite prefix -> continuation pairs
         _synchronize_composite_overlap_pivots(filtered_units, audio, sr)
@@ -595,7 +703,7 @@ def _run(args):
                 "in_margin": in_m,
                 "out_margin": out_m,
                 "transcript": transcript,
-                "whisper_transcript": su.get("whisper_transcript", transcript),
+                "asr_transcript": su.get("asr_transcript") or su.get("whisper_transcript") or transcript,
                 "composite_role": su.get("composite_role", "none"),
                 "is_composite_splice": bool(su.get("is_composite_splice", False)),
                 "llm_verified_window": bool(su.get("llm_verified_window", False)),
@@ -659,7 +767,7 @@ def _run(args):
     json_path = out_dir / f"{base_name}_{tag}_edl.json"
     json_path.write_text(json.dumps({
         "project_title": f"{base_name} AI Video Trimmer ({tag})",
-        "pacing_style": "text_based_whisper_grounded",
+        "pacing_style": "text_based_acoustic_grounded",
         "asr_engine": args.asr_engine,
         "agent_verdict": verdict,
         "inference_metrics": inference_metrics,
@@ -738,7 +846,7 @@ def main():
     parser.add_argument("--language", default="auto",
                         help="Spoken language code: auto, zh-TW, zh-CN, en, ja, ko (default: auto)")
     parser.add_argument("--force", action="store_true",
-                        help="Bypass cached word timestamps (<basename>_whisper_raw.json) and force re-transcription")
+                        help="Bypass cached word timestamps (<basename>_words.json) and force re-transcription")
     parser.add_argument("--model", "-m", default=default_model, help=f"Gemini model name (default: {default_model})")
     parser.add_argument("--project", default=None, help="Google Cloud Project ID (defaults to GOOGLE_CLOUD_PROJECT/GCP_PROJECT or ADC)")
     parser.add_argument("--region", default=None, help="Vertex AI region/location (defaults to GOOGLE_CLOUD_LOCATION/GCP_REGION or 'global')")

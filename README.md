@@ -34,8 +34,8 @@ flowchart TD
 
     subgraph L1["Layer 1: Dual-Engine Acoustic & Punctuation Segmentation (chirp3_asr / transcribe)"]
         W_ASR["Dual-Engine Word-Level ASR<br/>(Default: Cloud STT V2 Chirp 3 0.001s | Optional: Whisper)"]:::stage1Style
-        S_SEG["Physical Boundary Sentence ID Split<br/>(Breath Pause >=0.20s, Stretched Onset, Punctuation & Conjunctions)"]:::stage1Style
-        W_JSON["Artifact: <basename>_whisper_raw.json<br/>(Engine-Tagged Acoustic Ground Truth & Sentence Index)"]:::artifactStyle
+        S_SEG["Physical Boundary Sentence ID Split<br/>(Breath Pause >=0.20s, Stretched Onset & Universal Punctuation)"]:::stage1Style
+        W_JSON["Artifacts: <basename>_words.json & _sentences.json<br/>(Engine-Tagged Acoustic Ground Truth & Sentence Index)"]:::artifactStyle
         W_ASR --> S_SEG --> W_JSON
     end
 
@@ -269,8 +269,8 @@ For an input video `raw_footage.mp4`, the agent automatically creates an `output
 2. **`output/raw_footage_<tag>_edl.xml`**: Final Cut Pro 7 XML timeline for **Adobe Premiere Pro** and **DaVinci Resolve** (with `Composite Splice` markers).
 3. **`output/raw_footage_<tag>_edl.fcpxml`**: Apple FCPXML v1.9 timeline for **Final Cut Pro** (with `Composite Splice` markers).
 4. **`output/raw_footage_<tag>_edl.json`** & **`_edl.csv`**: Structured decision metadata and spreadsheet cut table with editorial notes.
-5. **`output/raw_footage_<tag>_edl_report.md`** & **`_edl_report.json`**: 8-dimension rough-cut quality audit report with `asr_engine`, `composite_splices_count`, and top-level `agent_verdict`.
-6. **`output/raw_footage_whisper_raw.json`**: Engine-tagged (`chirp3` or `whisper`) cached word-level acoustic transcript.
+5. **`output/raw_footage_<tag>_edl_report.md`** & **`_edl_report.json`**: 8-dimension rough-cut quality audit report with `asr_engine`, `1_acoustic_lock`, `composite_splices_count`, and top-level `agent_verdict`.
+6. **`output/raw_footage_words.json`** & **`output/raw_footage_sentences.json`**: Engine-tagged (`chirp3` or `whisper`) cached word-level acoustic ground truth and clause-segmented `Sentence ID` candidate index.
 
 ---
 
@@ -285,7 +285,7 @@ For an input video `raw_footage.mp4`, the agent automatically creates an `output
 
 ## Unit Testing
 
-Run the offline test suite (126 tests) before committing changes:
+Run the offline test suite (149 tests) before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v

@@ -34,8 +34,8 @@ flowchart TD
 
     subgraph L1["Layer 1: 듀얼 엔진 음향 및 구두점 절 분할 (chirp3_asr / transcribe)"]
         W_ASR["듀얼 엔진 단어 단위 ASR<br/>(기본값: Cloud STT V2 Chirp 3 0.001s | 선택: Whisper)"]:::stage1Style
-        S_SEG["물리적 경계 Sentence ID 분할<br/>(호흡 휴지 >=0.20s, 장음, 문장 부호 및 접속사 결합)"]:::stage1Style
-        W_JSON["중간 아티팩트: <basename>_whisper_raw.json<br/>(asr_engine 태그 음향 타임스탬프 및 문장 인덱스)"]:::artifactStyle
+        S_SEG["물리적 경계 Sentence ID 분할<br/>(호흡 휴지 >=0.20s, 장음 및 범용 문장 부호 경계)"]:::stage1Style
+        W_JSON["중간 아티팩트: <basename>_words.json & _sentences.json<br/>(asr_engine 태그 음향 타임스탬프 및 문장 인덱스)"]:::artifactStyle
         W_ASR --> S_SEG --> W_JSON
     end
 

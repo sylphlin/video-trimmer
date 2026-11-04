@@ -19,8 +19,10 @@ from pathlib import Path
 from .acoustic import calculate_clip_cps
 from .chirp3_asr import join_words_for_display
 from .transcribe import (
-    _are_sentences_retake_related,
+    _build_word_char_timeline,
     _find_best_char_span,
+    _slice_words_on_char_span,
+    is_earlier_sentence_ng_retake,
     is_viable_sub_span,
     normalize_text,
 )
@@ -264,11 +266,11 @@ def _clip_time_bounds(clip: dict, unit_by_id: dict[int, dict], whisper_units: li
 
 def _clip_dual_texts(clip: dict, unit_by_id: dict[int, dict], whisper_units: list[dict]) -> tuple[str, str]:
     """
-    Return `(llm_transcript, whisper_transcript)` for a clip so anomaly detectors and
+    Return `(llm_transcript, asr_transcript)` for a clip so anomaly detectors and
     quality auditors can inspect both LLM-cleaned text and physical ASR words.
     """
     llm_text = (clip.get("transcript") or "").strip()
-    w_text = (clip.get("whisper_transcript") or "").strip()
+    w_text = (clip.get("asr_transcript") or clip.get("whisper_transcript") or "").strip()
     if not w_text:
         sids = _resolve_clip_sentence_ids(clip, whisper_units)
         t_first = clip.get("t_first")
@@ -301,6 +303,54 @@ def _clip_dual_texts(clip: dict, unit_by_id: dict[int, dict], whisper_units: lis
     if not w_text:
         w_text = llm_text
     return llm_text, w_text
+
+
+def _count_fuzzy_script_occurrences(
+    phrase_norm: str,
+    script_norm: str,
+    max_substitutions: int | None = None,
+) -> int:
+    """
+    Count non-overlapping occurrences of `phrase_norm` in `script_norm` while tolerating
+    minor ASR homophone substitutions (1 char for phrases >= 5 chars, 2 chars for >= 10 chars).
+    """
+    p_len = len(phrase_norm)
+    if p_len == 0 or len(script_norm) < p_len:
+        return 0
+    if max_substitutions is None:
+        if p_len >= 10:
+            max_sub = 2
+        elif p_len >= 5:
+            max_sub = 1
+        else:
+            max_sub = 0
+    else:
+        max_sub = max(0, max_substitutions)
+
+    if max_sub == 0:
+        return script_norm.count(phrase_norm)
+
+    count = 0
+    pos = 0
+    limit = len(script_norm) - p_len
+    while pos <= limit:
+        window = script_norm[pos : pos + p_len]
+        if window == phrase_norm:
+            count += 1
+            pos += p_len
+            continue
+        mismatches = 0
+        for ch_a, ch_b in zip(phrase_norm, window):
+            if ch_a != ch_b:
+                mismatches += 1
+                if mismatches > max_sub:
+                    break
+        if mismatches <= max_sub:
+            count += 1
+            pos += p_len
+        else:
+            pos += 1
+    return count
 
 
 def _is_phrase_legitimately_repeated_in_script(
@@ -341,10 +391,25 @@ def _is_phrase_legitimately_repeated_in_script(
     if _has_close_repeat(phrase_norm):
         return True
 
-    # Tolerate 1-char edge homophone drift (such as "信號" vs "訊號") on phrases >= 5 chars
+    # Tolerate 1-char homophone drift (such as "信號" vs "訊號") on phrases >= 5 chars
     if len(phrase_norm) >= 5:
         if _has_close_repeat(phrase_norm[1:]) or _has_close_repeat(phrase_norm[:-1]):
             return True
+        if full_norm and len(full_norm) >= len(phrase_norm) * 2:
+            sub_len = len(phrase_norm)
+            match_positions: list[int] = []
+            for pos in range(len(full_norm) - sub_len + 1):
+                win = full_norm[pos : pos + sub_len]
+                mismatches = 0
+                for ca, cb in zip(phrase_norm, win):
+                    if ca != cb:
+                        mismatches += 1
+                        if mismatches > 1:
+                            break
+                if mismatches <= 1 and (not match_positions or pos >= match_positions[-1] + sub_len):
+                    if match_positions and (pos - match_positions[-1]) <= sub_len + max_gap_chars:
+                        return True
+                    match_positions.append(pos)
 
     return False
 
@@ -392,7 +457,7 @@ def _detect_tail_head_overlap(
     beginning of `text_b` (`TAIL_HEAD_RETAKE`).
 
     ASD-STE100:
-    1. Check the last 32 normalized characters of `text_a` against the first 36 normalized
+    1. Check the last 48 normalized characters of `text_a` against the first 48 normalized
        characters of `text_b`.
     2. Require the match in `text_b` to start near the opening (`longest.b <= 6`) so repeated
        objects in the middle of the next sentence are never mistaken for stumbles.
@@ -403,8 +468,8 @@ def _detect_tail_head_overlap(
     if len(norm_a) < min_stumble_chars or len(norm_b) < min_stumble_chars:
         return None
 
-    tail_a = norm_a[-32:]
-    head_b = norm_b[:36]
+    tail_a = norm_a[-48:]
+    head_b = norm_b[:48]
 
     # 1. Suffix-to-prefix check with tolerance for 1-2 trailing stumble chars at the end of tail_a
     for stumble_tail in range(0, max_trailing_stumble + 1):
@@ -465,7 +530,7 @@ def _detect_intra_clip_repeat(
     1. Scan normalized text for substrings >= `min_repeat_chars` repeating within `max_gap_chars`,
        exempting phrases that legitimately repeat in the reference script.
     2. When `include_punctuated_short_stutter=True` (pre-render micro-window radar only), also flag
-       comma- or filler-separated 2-to-5 character stutters so Gemini can evaluate them by audio.
+       short 2-to-5 character clause-opening stutters so Gemini can evaluate them by audio.
     """
     norm = normalize_text(text)
     n = len(norm)
@@ -481,8 +546,15 @@ def _detect_intra_clip_repeat(
                         continue
                     return sub
 
-    # 2. Punctuated short stutter candidate (for LLM micro-window multimodal review only)
+    # 2. Short clause-opening stutter candidate (for LLM micro-window multimodal review only)
     if include_punctuated_short_stutter and text:
+        if n >= 6:
+            for k in range(min(5, n // 2), 2, -1):
+                cand_open = norm[:k]
+                if norm[k : 2 * k] == cand_open or (k >= 4 and norm[k : 2 * k - 1] == cand_open[:-1]):
+                    if not _is_phrase_legitimately_repeated_in_script(cand_open, script_text, script_blocks):
+                        return cand_open
+
         raw_clauses = [
             c.strip()
             for c in re.split(r"[，,、；;：:…—]+", text)
@@ -514,6 +586,23 @@ def _detect_intra_clip_repeat(
     return None
 
 
+def _is_opening_retake_pair(prev_text: str, next_text: str) -> bool:
+    """
+    Return True only when `prev_text` is an earlier opening false-start or full retake of `next_text`.
+
+    ASD-STE100:
+    Evaluate directionally (`prev_text -> next_text`) so a long sentence `"A + B"` followed by
+    a partial tail pick-up `"B"` is handled as a tail-to-head overlap instead of dropping `"A + B"`.
+    """
+    if is_earlier_sentence_ng_retake(prev_text, next_text):
+        return True
+    na = normalize_text(prev_text)
+    nb = normalize_text(next_text)
+    if len(na) >= 4 and len(nb) >= 4 and na[:4] == nb[:4] and len(nb) >= int(len(na) * 0.75):
+        return True
+    return False
+
+
 def _trim_raw_transcript_to_norm_len(transcript: str, keep_norm_chars: int) -> str:
     """Keep the first `keep_norm_chars` normalized characters of `transcript` and strip trailing seam punctuation."""
     if keep_norm_chars <= 0:
@@ -525,6 +614,19 @@ def _trim_raw_transcript_to_norm_len(transcript: str, keep_norm_chars: int) -> s
         return transcript.strip()
     end_raw = norm_raw_indices[keep_norm_chars]
     return transcript[:end_raw].rstrip(" ，,、；;：:——-　").strip()
+
+
+def _trim_raw_transcript_head_by_norm_chars(transcript: str, drop_norm_chars: int) -> str:
+    """Drop the first `drop_norm_chars` normalized characters of `transcript` and strip leading seam punctuation."""
+    if drop_norm_chars <= 0 or not transcript:
+        return (transcript or "").strip()
+    norm_raw_indices = [
+        raw_i for raw_i, ch in enumerate(transcript) if re.match(r"[\w一-鿿]", ch)
+    ]
+    if drop_norm_chars >= len(norm_raw_indices):
+        return ""
+    start_raw = norm_raw_indices[drop_norm_chars]
+    return transcript[start_raw:].lstrip(" ，,、。！？!?；;：:——-　").strip()
 
 
 def _is_complementary_composite_pair(
@@ -556,7 +658,7 @@ def _is_complementary_composite_pair(
     # Reject pairs that still contain opening retake or unexempted tail-head overlap
     if (
         not _is_phrase_legitimately_repeated_in_script(norm_a[:6], script_blocks=script_blocks)
-        and _are_sentences_retake_related(llm_a, llm_b)
+        and _is_opening_retake_pair(llm_a, llm_b)
     ) or _detect_tail_head_overlap(llm_a, llm_b, script_blocks=script_blocks):
         return False
 
@@ -597,13 +699,13 @@ def resolve_composite_prefix_occlusions(
     script_text: str | None = None,
 ) -> list[dict]:
     """
-    Apply Right-to-Left Span Occlusion exclusively to composite pick-up pairs.
+    Apply Right-to-Left Span Occlusion to composite pick-up pairs and Mode A unscripted overlaps.
 
     ASD-STE100:
     1. Anchor on the latest take (`continuation`) so `Take 2` owns 100% of any overlapping words.
     2. Trim any residual overlapping tail phrase from the preceding `prefix` clip's transcript.
     3. Drop the preceding clip (`Last-Take-Wins`) if the remaining unique prefix fails `is_viable_sub_span`.
-    4. Do not modify non-composite sentence boundaries; route ambiguous non-composite overlaps to LLM micro-window review.
+    4. Preserve `llm_verified_window` pairs and route unscripted Mode B non-composite overlaps to LLM micro-window review.
     """
     if len(clips) <= 1:
         return [dict(c) for c in clips]
@@ -637,6 +739,9 @@ def resolve_composite_prefix_occlusions(
             or bool(curr.get("is_composite_splice"))
         )
 
+        if prev.get("llm_verified_window") and curr.get("llm_verified_window") and not explicit_composite:
+            continue
+
         llm_p, _ = _clip_dual_texts(prev, unit_by_id, whisper_units)
         llm_c, _ = _clip_dual_texts(curr, unit_by_id, whisper_units)
         norm_p = normalize_text(llm_p)
@@ -663,31 +768,36 @@ def resolve_composite_prefix_occlusions(
                 if 0.25 <= cov_p < 0.85 and 0.30 <= cov_c < 0.85 and cov_comb >= cov_c + 0.15:
                     mode_a_tail_pickup = True
 
-        if not explicit_composite and not mode_a_tail_pickup:
+        is_opening_retake = (
+            not _is_phrase_legitimately_repeated_in_script(norm_p[:6], script_text, script_blocks)
+            and _is_opening_retake_pair(llm_p, llm_c)
+        )
+        overlap_str = None
+        if not is_opening_retake:
+            overlap_str = _detect_tail_head_overlap(
+                llm_p,
+                llm_c,
+                min_exact_chars=4,
+                min_stumble_chars=3,
+                script_text=script_text,
+                script_blocks=script_blocks,
+                extend_pre_overlap_prefix=True,
+            )
+
+        mode_a_unscripted_retake = bool(script_blocks) and (is_opening_retake or bool(overlap_str))
+        if not explicit_composite and not mode_a_tail_pickup and not mode_a_unscripted_retake:
             continue
 
         # Full retake check: if `curr` restarts from the beginning of `prev`, `Last-Take-Wins` drops `prev`
-        if (
-            not _is_phrase_legitimately_repeated_in_script(norm_p[:6], script_text, script_blocks)
-            and _are_sentences_retake_related(llm_p, llm_c)
-        ):
+        if is_opening_retake:
             keep_mask[prev_idx] = False
             curr["composite_role"] = "none"
             curr["is_composite_splice"] = False
             continue
 
         # Right-to-Left occlusion of any overlapping tail on `prev`
-        overlap_str = _detect_tail_head_overlap(
-            llm_p,
-            llm_c,
-            min_exact_chars=4,
-            min_stumble_chars=3,
-            script_text=script_text,
-            script_blocks=script_blocks,
-            extend_pre_overlap_prefix=True,
-        )
         if overlap_str:
-            pos_in_tail = norm_p.rfind(overlap_str, max(0, len(norm_p) - 36))
+            pos_in_tail = norm_p.rfind(overlap_str, max(0, len(norm_p) - 52))
             if pos_in_tail != -1:
                 trimmed_tr = _trim_raw_transcript_to_norm_len(llm_p, pos_in_tail)
                 if not is_viable_sub_span(trimmed_tr):
@@ -698,6 +808,7 @@ def resolve_composite_prefix_occlusions(
                     continue
                 prev["transcript"] = trimmed_tr
                 prev["trimmed_tail"] = True
+                prev.pop("asr_transcript", None)
                 prev.pop("whisper_transcript", None)
                 prev.pop("t_last", None)
 
@@ -711,16 +822,259 @@ def resolve_composite_prefix_occlusions(
             curr["is_composite_splice"] = False
             continue
 
-        prev["composite_role"] = "prefix"
-        prev["trimmed_tail"] = bool(prev.get("trimmed_tail", False) or explicit_composite)
-        curr["composite_role"] = "continuation"
-        curr["is_composite_splice"] = True
-        curr["trimmed_head"] = bool(curr.get("trimmed_head", False))
+        if explicit_composite or mode_a_tail_pickup or overlap_str:
+            prev["composite_role"] = "prefix"
+            prev["trimmed_tail"] = True
+            curr["composite_role"] = "continuation"
+            curr["is_composite_splice"] = True
+            curr["trimmed_head"] = bool(curr.get("trimmed_head", False))
 
     result = [c for idx, c in enumerate(working) if keep_mask[idx]]
     for idx, c in enumerate(result, start=1):
         c["clip_id"] = idx
     return result
+
+
+def occlude_expanded_sub_units(
+    filtered_units: list[dict],
+    script_text: str | None = None,
+) -> list[dict]:
+    """
+    Apply word-level Right-to-Left occlusion and immediate stutter trimming across expanded sub-units.
+
+    ASD-STE100:
+    1. Trim unscripted immediate opening stutters (`A + A + B`) using character-timeline word slicing.
+    2. Trim unverified tail-to-head overlaps across expanded sub-units and lock `next_word_hard_wall`.
+    3. Preserve `llm_verified_window` pairs in Mode B so intentional rhetorical parallelism stays intact.
+    """
+    if not filtered_units:
+        return []
+
+    script_blocks = extract_script_blocks(script_text) if script_text else []
+    working = []
+    for su in filtered_units:
+        su_c = dict(su)
+        if "asr_transcript" not in su_c and "whisper_transcript" in su_c:
+            su_c["asr_transcript"] = su_c.pop("whisper_transcript")
+        working.append(su_c)
+
+    # Pass 1: Trim immediate opening stutters (`A_stutter + A_clean + B`) on unverified or Mode A sub-units
+    for su in working:
+        if su.get("llm_verified_window") and not script_blocks:
+            continue
+        su_words = list(su.get("words") or [])
+        if not su_words:
+            continue
+        dummy_sent = {"id": 0, "start": su["t_first"], "end": su["t_last"], "words": su_words}
+        tl = _build_word_char_timeline([dummy_sent])
+        s_norm = "".join(item["ch"] for item in tl)
+        if len(s_norm) < 6:
+            continue
+
+        trim_head_k = 0
+        for k in range(min(15, len(s_norm) // 2), 2, -1):
+            pref = s_norm[:k]
+            is_rep = (s_norm[k : 2 * k] == pref) or (k >= 4 and s_norm[k : 2 * k - 1] == pref[:-1])
+            if is_rep and not _is_phrase_legitimately_repeated_in_script(pref, script_text, script_blocks):
+                trim_head_k = k
+                break
+
+        if trim_head_k > 0 and trim_head_k < len(tl):
+            sliced_list, _, extra_b = _slice_words_on_char_span([dummy_sent], tl, trim_head_k, len(tl) - 1)
+            if sliced_list and sliced_list[0].get("words"):
+                kept_w = sliced_list[0]["words"]
+                new_w_text = sliced_list[0]["text"]
+                excised_end = (
+                    max(b_end for _, b_end in extra_b)
+                    if extra_b
+                    else float(tl[trim_head_k - 1]["w_end"])
+                )
+                su["words"] = kept_w
+                su["t_first"] = round(float(kept_w[0]["start"]), 3)
+                prev_end = su.get("prev_sentence_end")
+                su["prev_sentence_end"] = (
+                    round(max(float(prev_end), excised_end), 3)
+                    if prev_end is not None
+                    else round(excised_end, 3)
+                )
+                su["trimmed_head"] = True
+                su["asr_transcript"] = new_w_text
+                su.pop("whisper_transcript", None)
+                tr_raw = su.get("transcript") or ""
+                tr_norm = normalize_text(tr_raw)
+                if len(tr_norm) >= 2 * trim_head_k and (
+                    tr_norm[:trim_head_k] == s_norm[:trim_head_k]
+                ) and (
+                    tr_norm[trim_head_k : 2 * trim_head_k] == tr_norm[:trim_head_k]
+                    or (trim_head_k >= 4 and tr_norm[trim_head_k : 2 * trim_head_k - 1] == tr_norm[: trim_head_k - 1])
+                ):
+                    su["transcript"] = _trim_raw_transcript_head_by_norm_chars(tr_raw, trim_head_k) or new_w_text
+                elif not tr_raw:
+                    su["transcript"] = new_w_text
+
+    if len(working) <= 1:
+        return working
+
+    # Pass 2: Right-to-Left retake and tail-to-head overlap occlusion across adjacent sub-units
+    keep_mask = [True] * len(working)
+    closure_chars = ("。", "！", "？", "!", "?")
+
+    for i in range(len(working) - 1, 0, -1):
+        if not keep_mask[i]:
+            continue
+        curr_su = working[i]
+
+        while True:
+            prev_idx = i - 1
+            while prev_idx >= 0 and not keep_mask[prev_idx]:
+                prev_idx -= 1
+            if prev_idx < 0:
+                break
+            prev_su = working[prev_idx]
+
+            gap = float(curr_su.get("t_first", 0.0)) - float(prev_su.get("t_last", 0.0))
+            if gap > 25.0 or gap < -0.5:
+                break
+
+            explicit_composite = (
+                prev_su.get("composite_role") == "prefix"
+                or curr_su.get("composite_role") == "continuation"
+                or bool(curr_su.get("is_composite_splice"))
+            )
+            p_parent = prev_su.get("parent_clip")
+            c_parent = curr_su.get("parent_clip")
+            same_parent = p_parent is not None and c_parent is not None and (
+                p_parent is c_parent
+                or (p_parent.get("clip_id") is not None and p_parent.get("clip_id") == c_parent.get("clip_id"))
+            )
+            pair_verified = bool(prev_su.get("llm_verified_window") and curr_su.get("llm_verified_window"))
+
+            if pair_verified and not explicit_composite and not same_parent and not script_blocks:
+                break
+
+            p_text = prev_su.get("asr_transcript") or prev_su.get("whisper_transcript") or prev_su.get("transcript") or ""
+            c_text = curr_su.get("asr_transcript") or curr_su.get("whisper_transcript") or curr_su.get("transcript") or ""
+            p_norm = normalize_text(p_text)
+            c_norm = normalize_text(c_text)
+            if not p_norm or not c_norm:
+                break
+
+            can_drop_opening = bool(script_blocks) or explicit_composite or same_parent
+            if (
+                can_drop_opening
+                and not _is_phrase_legitimately_repeated_in_script(p_norm[:6], script_text, script_blocks)
+                and _is_opening_retake_pair(p_text, c_text)
+            ):
+                keep_mask[prev_idx] = False
+                curr_su["trimmed_head"] = True
+                continue
+
+            ov = _detect_tail_head_overlap(
+                p_text,
+                c_text,
+                min_exact_chars=4,
+                min_stumble_chars=3,
+                script_text=script_text,
+                script_blocks=script_blocks,
+                extend_pre_overlap_prefix=True,
+            )
+            if not ov:
+                break
+
+            if same_parent and not script_blocks:
+                parent_tr = normalize_text((p_parent or {}).get("transcript") or "")
+                if parent_tr and parent_tr.count(ov) >= 2:
+                    break
+
+            pos_in_tail = p_norm.rfind(ov, max(0, len(p_norm) - 52))
+            if pos_in_tail == -1:
+                break
+            if pos_in_tail <= 0:
+                keep_mask[prev_idx] = False
+                curr_su["trimmed_head"] = True
+                continue
+
+            p_words = list(prev_su.get("words") or [])
+            if not p_words:
+                break
+
+            dummy_p = {"id": 0, "start": prev_su["t_first"], "end": prev_su["t_last"], "words": p_words}
+            p_tl = _build_word_char_timeline([dummy_p])
+            if pos_in_tail >= len(p_tl):
+                break
+
+            sliced_p, _, extra_p = _slice_words_on_char_span([dummy_p], p_tl, 0, pos_in_tail - 1)
+            if not sliced_p or not sliced_p[0].get("words"):
+                keep_mask[prev_idx] = False
+                curr_su["trimmed_head"] = True
+                continue
+
+            keep_w = sliced_p[0]["words"]
+            new_text = sliced_p[0]["text"]
+            new_t_last = round(float(keep_w[-1]["end"]), 3)
+            new_dur = new_t_last - float(keep_w[0]["start"])
+            if not is_viable_sub_span(new_text, new_dur):
+                keep_mask[prev_idx] = False
+                curr_su["trimmed_head"] = True
+                continue
+
+            cut_candidates = [b_s for b_s, _ in extra_p if b_s >= new_t_last - 0.005]
+            cut_word_start = (
+                round(min(cut_candidates), 3)
+                if cut_candidates
+                else round(float(p_tl[pos_in_tail]["w_start"]), 3)
+            )
+            hard_wall = max(new_t_last, round(cut_word_start - 0.001, 3))
+
+            prev_su["words"] = keep_w
+            prev_su["t_last"] = new_t_last
+            prev_next = prev_su.get("next_sentence_start")
+            prev_su["next_sentence_start"] = (
+                round(min(float(prev_next), cut_word_start), 3)
+                if prev_next is not None
+                else cut_word_start
+            )
+            prev_wall = prev_su.get("next_word_hard_wall")
+            prev_su["next_word_hard_wall"] = (
+                round(min(float(prev_wall), hard_wall), 3)
+                if prev_wall is not None
+                else hard_wall
+            )
+            prev_su["trimmed_tail"] = True
+            prev_su["asr_transcript"] = new_text
+            prev_su.pop("whisper_transcript", None)
+
+            raw_p_tr = prev_su.get("transcript") or ""
+            raw_c_tr = curr_su.get("transcript") or c_text
+            ov_tr = _detect_tail_head_overlap(
+                raw_p_tr,
+                raw_c_tr,
+                min_exact_chars=4,
+                min_stumble_chars=3,
+                script_text=script_text,
+                script_blocks=script_blocks,
+                extend_pre_overlap_prefix=True,
+            )
+            raw_p_norm = normalize_text(raw_p_tr)
+            if ov_tr and raw_p_norm:
+                tr_pos = raw_p_norm.rfind(ov_tr, max(0, len(raw_p_norm) - 52))
+                if tr_pos > 0:
+                    prev_su["transcript"] = _trim_raw_transcript_to_norm_len(raw_p_tr, tr_pos) or new_text
+                else:
+                    prev_su["transcript"] = new_text
+            elif len(raw_p_norm) > pos_in_tail:
+                prev_su["transcript"] = _trim_raw_transcript_to_norm_len(raw_p_tr, pos_in_tail) or new_text
+            else:
+                prev_su["transcript"] = raw_p_tr or new_text
+
+            if explicit_composite or not any(str(keep_w[-1].get("word", "")).strip().endswith(p) for p in closure_chars):
+                prev_su["composite_role"] = "prefix"
+                curr_su["composite_role"] = "continuation"
+                curr_su["is_composite_splice"] = True
+            curr_su["trimmed_head"] = True
+            break
+
+    return [su for idx, su in enumerate(working) if keep_mask[idx]]
 
 
 def _detect_script_take_collisions(
@@ -906,6 +1260,211 @@ def deduplicate_and_sort_clips(
     return deduped
 
 
+def _detect_script_precision_anomalies(
+    clips: list[dict],
+    whisper_units: list[dict],
+    total_dur: float,
+    script_text: str | None,
+    script_blocks: list[dict] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Detect Mode A script phrase multiplicities and unscripted extraneous spans.
+
+    ASD-STE100:
+    1. Flag `SCRIPT_PHRASE_MULTIPLICITY` when two clips within 45s repeat a >= 5 CJK char
+       (or >= 18 Latin char) clause more times than it occurs in the reference script.
+    2. Flag `UNSCRIPTED_EXTRANEOUS_SPAN` when physical `asr_transcript` leaks >= 5 unscripted
+       characters beyond `transcript` or retains a >= 6 CJK char unscripted false start/tail.
+    """
+    blocks = script_blocks if script_blocks is not None else (extract_script_blocks(script_text) if script_text else [])
+    if not blocks or not clips:
+        return [], []
+
+    script_norm = "".join(b.get("norm_text", "") for b in blocks if b.get("norm_text"))
+    if not script_norm:
+        return [], []
+
+    unit_by_id = {int(u["id"]): u for u in whisper_units if "id" in u}
+    multiplicities: list[dict] = []
+    extraneous_spans: list[dict] = []
+
+    bounds: list[tuple[float, float]] = []
+    eff_norms: list[str] = []
+    for idx, c in enumerate(clips):
+        t_in, t_out = _clip_time_bounds(c, unit_by_id, whisper_units)
+        bounds.append((t_in, t_out))
+        has_aligned_asr = bool((c.get("asr_transcript") or c.get("whisper_transcript") or "").strip())
+        llm_t, w_t = _clip_dual_texts(c, unit_by_id, whisper_units)
+        eff_t = w_t if has_aligned_asr else llm_t
+        eff_n = normalize_text(eff_t)
+        eff_norms.append(eff_n)
+
+        # Check C-2a: Physical ASR alignment leak beyond LLM-cleaned transcript
+        if has_aligned_asr and not c.get("llm_verified_window"):
+            llm_n = normalize_text(llm_t)
+            asr_n = normalize_text(w_t)
+            if llm_n and (len(asr_n) - len(llm_n)) >= 5:
+                sm_leak = difflib.SequenceMatcher(None, asr_n, llm_n, autojunk=False)
+                for tag, i1, i2, j1, j2 in sm_leak.get_opcodes():
+                    if tag == "equal":
+                        continue
+                    ins_len = i2 - i1
+                    tgt_len = j2 - j1
+                    if (ins_len - tgt_len) >= 5:
+                        leak_str = asr_n[i1:i2]
+                        if _count_fuzzy_script_occurrences(leak_str, script_norm) == 0:
+                            win_start = max(0.0, t_in - 3.0)
+                            win_end = min(total_dur, max(win_start + MIN_MICRO_WINDOW_SEC, t_out + 3.0))
+                            extraneous_spans.append({
+                                "type": "UNSCRIPTED_EXTRANEOUS_SPAN",
+                                "idx": idx,
+                                "clip_id": c.get("clip_id", idx + 1),
+                                "extraneous_text": leak_str,
+                                "replace_range": (idx, idx + 1),
+                                "win_start": round(win_start, 2),
+                                "win_end": round(win_end, 2),
+                                "reason": (
+                                    f"Clip {idx + 1} physical ASR alignment retained extraneous unscripted span "
+                                    f"'{leak_str}' absent from both the cleaned transcript and reference script."
+                                ),
+                            })
+                            break
+
+    # Check C-1: Script phrase multiplicity across distinct clips within 45s
+    for idx_a in range(len(clips)):
+        norm_a = eff_norms[idx_a]
+        if not norm_a:
+            continue
+        t_a_in, t_a_out = bounds[idx_a]
+        for idx_b in range(idx_a + 1, len(clips)):
+            norm_b = eff_norms[idx_b]
+            if not norm_b:
+                continue
+            t_b_in, t_b_out = bounds[idx_b]
+            if (t_b_in - t_a_out) > 45.0 or (t_b_out - t_a_in) > MAX_MICRO_WINDOW_SEC:
+                continue
+            if idx_b == idx_a + 1 and _is_complementary_composite_pair(
+                clips[idx_a], clips[idx_b], unit_by_id, whisper_units, blocks
+            ):
+                continue
+
+            shared = difflib.SequenceMatcher(None, norm_a, norm_b, autojunk=False).find_longest_match(
+                0, len(norm_a), 0, len(norm_b)
+            )
+            if shared.size < 5:
+                continue
+            shared_str = norm_a[shared.a : shared.a + shared.size]
+            cjk_count = sum(1 for ch in shared_str if "\u4e00" <= ch <= "\u9fff")
+            if not (cjk_count >= 5 or len(shared_str) >= 18):
+                continue
+            if not (
+                len(shared_str) >= min(len(norm_a), len(norm_b)) * 0.45
+                or cjk_count >= 7
+                or len(shared_str) >= 24
+            ):
+                continue
+
+            script_occ = _count_fuzzy_script_occurrences(shared_str, script_norm)
+            if script_occ >= 2:
+                continue
+
+            pair_verified = bool(
+                clips[idx_a].get("llm_verified_window") and clips[idx_b].get("llm_verified_window")
+            )
+            win_start = max(0.0, t_a_in - 3.0)
+            win_end = min(total_dur, max(win_start + MIN_MICRO_WINDOW_SEC, t_b_out + 3.0))
+            multiplicities.append({
+                "type": "SCRIPT_PHRASE_MULTIPLICITY",
+                "idx_a": idx_a,
+                "idx_b": idx_b,
+                "clip_a": clips[idx_a].get("clip_id", idx_a + 1),
+                "clip_b": clips[idx_b].get("clip_id", idx_b + 1),
+                "phrase": shared_str,
+                "script_occurrences": script_occ,
+                "llm_verified": pair_verified,
+                "replace_range": (idx_a, idx_b + 1),
+                "win_start": round(win_start, 2),
+                "win_end": round(win_end, 2),
+                "reason": (
+                    f"Clips {idx_a + 1} and {idx_b + 1} both speak '{shared_str}', which occurs "
+                    f"{script_occ} time(s) in the reference script; keep only the final clean take."
+                ),
+            })
+
+    # Check C-2b: Global sequence alignment against script_norm for unscripted false starts or tails
+    already_flagged_clips = {item["idx"] for item in extraneous_spans}
+    clip_char_ranges: list[tuple[int, int, int]] = []
+    cursor = 0
+    for idx, c_n in enumerate(eff_norms):
+        if not c_n:
+            continue
+        clip_char_ranges.append((cursor, cursor + len(c_n), idx))
+        cursor += len(c_n)
+
+    selected_norm = "".join(eff_norms)
+    if selected_norm and clip_char_ranges:
+        sm_global = difflib.SequenceMatcher(None, selected_norm, script_norm, autojunk=False)
+        for tag, i1, i2, j1, j2 in sm_global.get_opcodes():
+            if tag == "equal":
+                continue
+            ins_len = i2 - i1
+            scr_len = j2 - j1
+            if ins_len < 6:
+                continue
+            span_str = selected_norm[i1:i2]
+            cjk_ins = sum(1 for ch in span_str if "\u4e00" <= ch <= "\u9fff")
+            is_significant_unscripted = (cjk_ins >= 6 and (ins_len - scr_len) >= 5) or (
+                ins_len >= 22 and (ins_len - scr_len) >= 16
+            )
+            if not is_significant_unscripted:
+                continue
+            if _count_fuzzy_script_occurrences(span_str, script_norm) > 0:
+                continue
+
+            best_owner = None
+            best_ov = 0
+            best_bounds = (0, 0)
+            for c_start, c_end, c_idx in clip_char_ranges:
+                ov_s = max(i1, c_start)
+                ov_e = min(i2, c_end)
+                if ov_e - ov_s > best_ov:
+                    best_ov = ov_e - ov_s
+                    best_owner = c_idx
+                    best_bounds = (c_start, c_end)
+
+            if best_owner is None or best_owner in already_flagged_clips:
+                continue
+            if clips[best_owner].get("llm_verified_window"):
+                continue
+
+            c_start, c_end = best_bounds
+            ov_s = max(i1, c_start)
+            ov_e = min(i2, c_end)
+            touches_boundary = (ov_s - c_start) <= 2 or (c_end - ov_e) <= 2
+            if not touches_boundary and cjk_ins < 8 and ins_len < 28:
+                continue
+
+            t_in, t_out = bounds[best_owner]
+            win_start = max(0.0, t_in - 3.0)
+            win_end = min(total_dur, max(win_start + MIN_MICRO_WINDOW_SEC, t_out + 3.0))
+            already_flagged_clips.add(best_owner)
+            extraneous_spans.append({
+                "type": "UNSCRIPTED_EXTRANEOUS_SPAN",
+                "idx": best_owner,
+                "clip_id": clips[best_owner].get("clip_id", best_owner + 1),
+                "extraneous_text": selected_norm[ov_s:ov_e],
+                "replace_range": (best_owner, best_owner + 1),
+                "win_start": round(win_start, 2),
+                "win_end": round(win_end, 2),
+                "reason": (
+                    f"Clip {best_owner + 1} retains an unscripted spoken span '{selected_norm[ov_s:ov_e]}' "
+                    "not present in the reference script (likely an unpruned false start or off-script remark)."
+                ),
+            })
+
+    return multiplicities, extraneous_spans
+
+
 def detect_micro_window_anomalies(
     model_edl: dict,
     whisper_units: list[dict],
@@ -913,7 +1472,7 @@ def detect_micro_window_anomalies(
     script_text: str | None = None,
 ) -> list[dict]:
     """
-    Inspect the initial LLM EDL before video rendering and coalesce 15-to-90s micro-windows
+    Inspect the EDL before video rendering and coalesce 15-to-90s micro-windows
     that require targeted Gemini multimodal re-arbitration.
 
     ASD-STE100:
@@ -921,7 +1480,8 @@ def detect_micro_window_anomalies(
     1. POTENTIAL_RESIDUAL_RETAKE / TAIL_HEAD_RETAKE: Adjacent clips share retake phrasing,
        tail-to-head stumbled clauses, or overlapping physical sub-spans.
     2. INTRA_CLIP_REPEAT: A single clip contains an immediate internal repetition or punctuated stutter.
-    3. SCRIPT_TAKE_COLLISION: Multiple clips attempt the same Mode A `[Script Block NN]`.
+    3. SCRIPT_TAKE_COLLISION / SCRIPT_PHRASE_MULTIPLICITY / UNSCRIPTED_EXTRANEOUS_SPAN:
+       Mode A script take collisions, duplicate script phrases, or unscripted extraneous spans.
     4. UNANCHORED_CLIP: Clip lacks valid sentence IDs.
     5. MISSING_SCRIPT_BLOCK: A script block exists in ASR sentences but is absent from the EDL.
     6. PARTIAL_SCRIPT_BLOCK_BACKFILL: Only a partial tail pick-up of a script block was selected
@@ -1002,8 +1562,8 @@ def detect_micro_window_anomalies(
             anomaly_type = "POTENTIAL_RESIDUAL_RETAKE"
             reason = f"Adjacent clips {idx + 1} and {idx + 2} share overlapping Sentence IDs {sorted(overlap_ids)}."
         elif not opening_whitelisted and (
-            (llm_curr and llm_next and _are_sentences_retake_related(llm_curr, llm_next))
-            or (curr_untrimmed and next_untrimmed and w_curr and w_next and _are_sentences_retake_related(w_curr, w_next))
+            (llm_curr and llm_next and _is_opening_retake_pair(llm_curr, llm_next))
+            or (curr_untrimmed and next_untrimmed and w_curr and w_next and _is_opening_retake_pair(w_curr, w_next))
         ):
             anomaly_type = "POTENTIAL_RESIDUAL_RETAKE"
             reason = (
@@ -1043,18 +1603,21 @@ def detect_micro_window_anomalies(
                     "reason": reason,
                 })
 
-    # 2. Check for intra-clip immediate repetitions or punctuated short stutters (`A + A + B`)
+    # 2. Check for intra-clip immediate repetitions, punctuated short stutters, or multi-sentence internal retakes
     for idx, c in enumerate(clips):
         if c.get("llm_verified_window"):
             continue
         llm_text, w_text = _clip_dual_texts(c, unit_by_id, whisper_units)
+        llm_norm = normalize_text(llm_text)
+        w_norm = normalize_text(w_text)
+        clip_untrimmed = len(llm_norm) >= len(w_norm) * 0.92
         repeated_sub = _detect_intra_clip_repeat(
             llm_text,
             script_text=script_text,
             script_blocks=script_blocks,
             include_punctuated_short_stutter=True,
         )
-        if repeated_sub is None and len(normalize_text(llm_text)) >= len(normalize_text(w_text)) * 0.92:
+        if repeated_sub is None and clip_untrimmed:
             repeated_sub = _detect_intra_clip_repeat(
                 w_text,
                 script_text=script_text,
@@ -1073,8 +1636,60 @@ def detect_micro_window_anomalies(
                     "win_end": round(win_end, 2),
                     "reason": f"Clip {idx + 1} contains an internal repeated phrase '{repeated_sub}' that requires stutter vs. emphasis review.",
                 })
+            continue
 
-    # 3. Mode A: Check for script block take collisions (`SCRIPT_TAKE_COLLISION`)
+        sids = _resolve_clip_sentence_ids(c, whisper_units)
+        if len(sids) >= 2:
+            for k in range(len(sids) - 1):
+                u_a = unit_by_id.get(sids[k])
+                u_b = unit_by_id.get(sids[k + 1])
+                if not u_a or not u_b:
+                    continue
+                t_a = str(u_a.get("text", "") or "")
+                t_b = str(u_b.get("text", "") or "")
+                n_a = normalize_text(t_a)
+                if not n_a:
+                    continue
+                open_prefix = n_a[: min(6, len(n_a))]
+                internal_anomaly_type = None
+                internal_reason = ""
+                if (
+                    len(open_prefix) >= 3
+                    and not _is_phrase_legitimately_repeated_in_script(open_prefix, script_text, script_blocks)
+                    and _is_opening_retake_pair(t_a, t_b)
+                    and (clip_untrimmed or llm_norm.count(open_prefix) >= 2)
+                ):
+                    internal_anomaly_type = "POTENTIAL_RESIDUAL_RETAKE"
+                    internal_reason = (
+                        f"Clip {idx + 1} spans Sentence IDs {sids[k]}->{sids[k + 1]} with repeated opening '{t_a[:20]}'."
+                    )
+                else:
+                    internal_ov = _detect_tail_head_overlap(
+                        t_a,
+                        t_b,
+                        script_text=script_text,
+                        script_blocks=script_blocks,
+                    )
+                    if internal_ov and (clip_untrimmed or llm_norm.count(internal_ov) >= 2):
+                        internal_anomaly_type = "TAIL_HEAD_RETAKE"
+                        internal_reason = (
+                            f"Clip {idx + 1} spans Sentence IDs {sids[k]}->{sids[k + 1]} with boundary stumble '{internal_ov}'."
+                        )
+                if internal_anomaly_type is not None:
+                    t_in, t_out = _clip_time_bounds(c, unit_by_id, whisper_units)
+                    win_start = max(0.0, t_in - 3.0)
+                    win_end = min(total_dur, max(win_start + MIN_MICRO_WINDOW_SEC, t_out + 3.0))
+                    if (win_end - win_start) <= MAX_MICRO_WINDOW_SEC:
+                        _add_or_merge_anomaly({
+                            "type": internal_anomaly_type,
+                            "replace_range": (idx, idx + 1),
+                            "win_start": round(win_start, 2),
+                            "win_end": round(win_end, 2),
+                            "reason": internal_reason,
+                        })
+                    break
+
+    # 3. Mode A: Check for script block take collisions, phrase multiplicities, and unscripted spans
     if script_text:
         collisions = _detect_script_take_collisions(clips, whisper_units, script_text, min_coverage=0.45)
         for col in collisions:
@@ -1096,6 +1711,34 @@ def detect_micro_window_anomalies(
                         f"Clips {col['clip_a']} and {col['clip_b']} both map to {col['label']} "
                         f"(coverage {col['score_a']} vs {col['score_b']}); arbitrate single winning take vs. valid multi-sentence sequence."
                     ),
+                })
+
+        multiplicities, extraneous_spans = _detect_script_precision_anomalies(
+            clips=clips,
+            whisper_units=whisper_units,
+            total_dur=total_dur,
+            script_text=script_text,
+            script_blocks=script_blocks,
+        )
+        for mult in multiplicities:
+            if mult.get("llm_verified"):
+                continue
+            if (mult["win_end"] - mult["win_start"]) <= MAX_MICRO_WINDOW_SEC:
+                _add_or_merge_anomaly({
+                    "type": "SCRIPT_PHRASE_MULTIPLICITY",
+                    "replace_range": mult["replace_range"],
+                    "win_start": mult["win_start"],
+                    "win_end": mult["win_end"],
+                    "reason": mult["reason"],
+                })
+        for ext in extraneous_spans:
+            if (ext["win_end"] - ext["win_start"]) <= MAX_MICRO_WINDOW_SEC:
+                _add_or_merge_anomaly({
+                    "type": "UNSCRIPTED_EXTRANEOUS_SPAN",
+                    "replace_range": ext["replace_range"],
+                    "win_start": ext["win_start"],
+                    "win_end": ext["win_end"],
+                    "reason": ext["reason"],
                 })
 
     # 4. Check for unanchored clips (missing sentence_ids)
@@ -1449,6 +2092,11 @@ def sanitize_refined_edl(
                     prev_sids.append(sid)
             prev["sentence_ids"] = prev_sids
             prev["transcript"] = join_words_for_display([prev.get("transcript", ""), c.get("transcript", "")])
+            prev_asr_tr = prev.get("asr_transcript") or prev.get("whisper_transcript") or ""
+            curr_asr_tr = c.get("asr_transcript") or c.get("whisper_transcript") or ""
+            if prev_asr_tr or curr_asr_tr:
+                prev["asr_transcript"] = join_words_for_display([prev_asr_tr, curr_asr_tr])
+                prev.pop("whisper_transcript", None)
             prev["cps"], _ = calculate_clip_cps(prev["transcript"], prev["duration"])
             prev["llm_verified_window"] = bool(
                 prev.get("llm_verified_window") and c.get("llm_verified_window")
@@ -1488,7 +2136,7 @@ def audit_edl_quality(
     Execute an 8-dimension rough-cut quality audit and compute the top-level agent_verdict.
 
     ASD-STE100:
-    Evaluate word-level lock rate, timeline monotonicity, retake hygiene, script coverage,
+    Evaluate acoustic lock rate, timeline monotonicity, retake hygiene, script coverage,
     flash-frame micro-clips, CPS dead-air anomalies, acoustic margins, and compression ratio.
     """
     clip_count = len(refined_edl)
@@ -1514,19 +2162,19 @@ def audit_edl_quality(
             },
         }
 
-    # Dimension 1: Word-Level Sentence Lock Rate
+    # Dimension 1: Acoustic Word-Level Sentence Lock Rate
     if whisper_units:
         locked_clips = [c for c in refined_edl if c.get("sentence_ids")]
-        whisper_lock_rate_pct = round(len(locked_clips) * 100.0 / clip_count, 1)
+        acoustic_lock_rate_pct = round(len(locked_clips) * 100.0 / clip_count, 1)
     else:
-        whisper_lock_rate_pct = 100.0
+        acoustic_lock_rate_pct = 100.0
 
-    if whisper_units and whisper_lock_rate_pct < 80.0:
+    if whisper_units and acoustic_lock_rate_pct < 80.0:
         fatal_violations.append(
-            f"Word-level sentence lock rate {whisper_lock_rate_pct:.1f}% is below the 80.0% minimum threshold."
+            f"Acoustic word-level sentence lock rate {acoustic_lock_rate_pct:.1f}% is below the 80.0% minimum threshold."
         )
-    elif whisper_units and whisper_lock_rate_pct < 90.0:
-        warnings.append(f"Word-level sentence lock rate is {whisper_lock_rate_pct:.1f}% (< 90.0%).")
+    elif whisper_units and acoustic_lock_rate_pct < 90.0:
+        warnings.append(f"Acoustic word-level sentence lock rate is {acoustic_lock_rate_pct:.1f}% (< 90.0%).")
 
     # Dimension 2: Timeline Monotonicity & Overlap Check
     overlap_count = 0
@@ -1573,8 +2221,8 @@ def audit_edl_quality(
         gap_sec = float(c_b["source_in"]) - float(c_a["source_out"])
         if gap_sec <= 25.0:
             if not opening_whitelisted and (
-                _are_sentences_retake_related(llm_a, llm_b)
-                or (a_untrimmed and b_untrimmed and _are_sentences_retake_related(w_a, w_b))
+                _is_opening_retake_pair(llm_a, llm_b)
+                or (a_untrimmed and b_untrimmed and _is_opening_retake_pair(w_a, w_b))
             ):
                 pair_entry = {
                     "type": "OPENING_RETAKE",
@@ -1661,8 +2309,9 @@ def audit_edl_quality(
     if off_screen_clip_ids:
         fatal_violations.append(f"Detected off-screen speaker audio in Clip(s) {off_screen_clip_ids}.")
 
-    # Dimension 4: Script Clause Coverage & Single-Winner Collision Check (Mode A)
+    # Dimension 4: Script Clause Coverage, Single-Winner Collision & Phrase Multiplicity Check (Mode A)
     script_take_collisions = []
+    script_phrase_multiplicities = []
     if script_blocks:
         combined_norm = "".join(normalize_text(c.get("transcript", "")) for c in refined_edl)
         matched_blocks = []
@@ -1702,6 +2351,34 @@ def audit_edl_quality(
             )
             fatal_violations.append(
                 f"Detected {len(script_take_collisions)} Mode A script block collision(s) ({col_desc}) [ERR_SCRIPT_TAKE_COLLISION]."
+            )
+
+        raw_multiplicities, _ = _detect_script_precision_anomalies(
+            clips=refined_edl,
+            whisper_units=whisper_units,
+            total_dur=total_dur,
+            script_text=script_text,
+            script_blocks=script_blocks,
+        )
+        for mult in raw_multiplicities:
+            if mult.get("llm_verified"):
+                warnings.append(
+                    f"LLM-verified window retained duplicate script phrase '{mult['phrase']}' across Clips {mult['clip_a']}&{mult['clip_b']}."
+                )
+            else:
+                script_phrase_multiplicities.append({
+                    "type": "ERR_SCRIPT_PHRASE_MULTIPLICITY",
+                    "clip_a": mult["clip_a"],
+                    "clip_b": mult["clip_b"],
+                    "phrase": mult["phrase"],
+                    "script_occurrences": mult["script_occurrences"],
+                })
+        if script_phrase_multiplicities:
+            mult_desc = ", ".join(
+                f"Clips {m['clip_a']}&{m['clip_b']} ('{m['phrase']}')" for m in script_phrase_multiplicities[:3]
+            )
+            fatal_violations.append(
+                f"Detected {len(script_phrase_multiplicities)} duplicate script phrase(s) ({mult_desc}) [ERR_SCRIPT_PHRASE_MULTIPLICITY]."
             )
     else:
         script_coverage_pct = None
@@ -1793,9 +2470,9 @@ def audit_edl_quality(
             "sanitization_stats": sanitization_stats or {},
         },
         "dimensions": {
-            "1_whisper_lock": {
-                "whisper_lock_rate_pct": whisper_lock_rate_pct,
-                "pass": (not whisper_units) or (whisper_lock_rate_pct >= 80.0),
+            "1_acoustic_lock": {
+                "acoustic_lock_rate_pct": acoustic_lock_rate_pct,
+                "pass": (not whisper_units) or (acoustic_lock_rate_pct >= 80.0),
             },
             "2_timeline_integrity": {
                 "overlap_count": overlap_count,
@@ -1822,12 +2499,15 @@ def audit_edl_quality(
                 "missing_blocks": missing_blocks,
                 "script_take_collision_count": len(script_take_collisions),
                 "script_take_collisions": script_take_collisions,
+                "script_phrase_multiplicity_count": len(script_phrase_multiplicities),
+                "script_phrase_multiplicities": script_phrase_multiplicities,
                 "pass": (
                     (not script_blocks)
                     or (
                         script_coverage_pct is not None
                         and script_coverage_pct >= 75.0
                         and len(script_take_collisions) == 0
+                        and len(script_phrase_multiplicities) == 0
                     )
                 ),
             },
@@ -1873,7 +2553,8 @@ def generate_edl_audit_markdown(report: dict, output_md_path: Path) -> None:
     repairs = report.get("micro_window_repairs", [])
     san = summary.get("sanitization_stats", {})
 
-    d1 = dims.get("1_whisper_lock", {})
+    d1 = dims.get("1_acoustic_lock") or dims.get("1_whisper_lock") or {}
+    d1_rate = d1.get("acoustic_lock_rate_pct", d1.get("whisper_lock_rate_pct"))
     d2 = dims.get("2_timeline_integrity", {})
     d3 = dims.get("3_retake_and_speaker_hygiene", {})
     d4 = dims.get("4_script_coverage", {})
@@ -1882,7 +2563,9 @@ def generate_edl_audit_markdown(report: dict, output_md_path: Path) -> None:
     d7 = dims.get("7_acoustic_margins", {})
 
     script_cov_str = (
-        f"{d4.get('script_coverage_pct')}% ({d4.get('total_script_blocks')} blocks, {d4.get('script_take_collision_count', 0)} collisions)"
+        f"{d4.get('script_coverage_pct')}% ({d4.get('total_script_blocks')} blocks, "
+        f"{d4.get('script_take_collision_count', 0)} collisions, "
+        f"{d4.get('script_phrase_multiplicity_count', 0)} multiplicities)"
         if d4.get("enabled")
         else "N/A (Mode B Unscripted)"
     )
@@ -1909,7 +2592,7 @@ def generate_edl_audit_markdown(report: dict, output_md_path: Path) -> None:
         "",
         "| Dimension | Metric | Result | Status |",
         "| :--- | :--- | :--- | :--- |",
-        f"| **1. Word-Level Sentence Lock** | Sentence ID Lock Rate | {d1.get('whisper_lock_rate_pct')}% | {'PASS' if d1.get('pass') else 'FAIL'} |",
+        f"| **1. Acoustic Word Lock** | Acoustic Lock Rate | {d1_rate}% | {'PASS' if d1.get('pass') else 'FAIL'} |",
         f"| **2. Timeline Monotonicity** | Overlaps / Out-of-Order | {d2.get('overlap_count')} / {d2.get('out_of_order_count')} | {'PASS' if d2.get('pass') else 'FAIL'} |",
         f"| **3. Retake & Speaker Hygiene** | Retakes / Intra Repeats / Crew Clips | {d3.get('residual_retake_count')} / {d3.get('intra_clip_repeat_count', 0)} / {d3.get('off_screen_speaker_clip_count')} | {'PASS' if d3.get('pass') else 'FAIL'} |",
         f"| **4. Script Block Coverage** | Mode A Coverage & Collisions | {script_cov_str} | {'PASS' if d4.get('pass') else 'FAIL'} |",

@@ -586,7 +586,7 @@ class TestAuditEdlQuality(unittest.TestCase):
                 "in_margin": 0.08,
                 "out_margin": 0.04,
                 "transcript": "今天我們來深入探討",
-                "whisper_transcript": "今天我們來深入探討",
+                "asr_transcript": "今天我們來深入探討",
                 "composite_role": "prefix",
                 "is_composite_splice": False,
                 "trimmed_tail": True,
@@ -604,7 +604,7 @@ class TestAuditEdlQuality(unittest.TestCase):
                 "in_margin": 0.04,
                 "out_margin": 0.10,
                 "transcript": "核心系統的效能與延遲表現非常出色。",
-                "whisper_transcript": "核心系統的效能與延遲表現非常出色。",
+                "asr_transcript": "核心系統的效能與延遲表現非常出色。",
                 "composite_role": "continuation",
                 "is_composite_splice": True,
             },
@@ -621,6 +621,7 @@ class TestAuditEdlQuality(unittest.TestCase):
             punch_in_composite=True,
         )
         self.assertTrue(report["agent_verdict"]["pass_quality_gate"])
+        self.assertEqual(report["dimensions"]["1_acoustic_lock"]["acoustic_lock_rate_pct"], 100.0)
         self.assertEqual(report["dimensions"]["4_script_coverage"]["script_take_collision_count"], 0)
         self.assertEqual(report["summary"]["composite_splices_count"], 1)
 
@@ -830,3 +831,207 @@ class TestAuditEdlQuality(unittest.TestCase):
         self.assertEqual(anomalies[0]["replace_range"], (0, 3))
         self.assertIn("TAIL_HEAD_RETAKE", anomalies[0]["sub_types"])
         self.assertIn("INTRA_CLIP_REPEAT", anomalies[0]["sub_types"])
+
+    def test_directional_opening_retake_preserves_long_prefix_before_tail_head_restart(self):
+        """Treat A+B followed by B+C as a tail-head overlap rather than deleting A+B as an opening retake."""
+        from scripts.edl_auditor import _detect_tail_head_overlap, _is_opening_retake_pair
+
+        text_prev = "每個人的步行姿態與骨架大小都會在空間中擾動無線電波，當空間裡的設備不斷回報通道摘要時就會留下特徵。"
+        text_next = "當空間裡的設備不斷回報通道摘要，你的動作就會被記錄成專屬特徵向量。"
+        self.assertFalse(_is_opening_retake_pair(text_prev, text_next))
+        overlap = _detect_tail_head_overlap(text_prev, text_next)
+        self.assertIsNotNone(overlap)
+        self.assertTrue(overlap.startswith("當空間裡的設備不斷回報"))
+
+    def test_occlude_expanded_sub_units_drops_opening_retakes_and_slices_multichar_tail_head_overlap(self):
+        """Drop expanded opening-retake sub-units and slice multi-char CJK words on tail-head overlap."""
+        from scripts.edl_auditor import occlude_expanded_sub_units
+
+        expanded = [
+            {
+                "parent_clip": {"clip_id": 1},
+                "sentence_ids": [10],
+                "t_first": 10.0,
+                "t_last": 14.8,
+                "prev_sentence_end": 9.2,
+                "next_sentence_start": 15.2,
+                "next_word_hard_wall": None,
+                "words": [
+                    {"word": "終端裝置將結果回傳給主機，", "start": 10.0, "end": 13.0},
+                    {"word": "也就是說我們", "start": 13.2, "end": 14.8},
+                ],
+                "transcript": "終端裝置將結果回傳給主機，也就是說我們",
+                "asr_transcript": "終端裝置將結果回傳給主機，也就是說我們",
+                "trimmed_head": False,
+                "trimmed_tail": False,
+                "composite_role": "none",
+                "is_composite_splice": False,
+                "llm_verified_window": False,
+            },
+            {
+                "parent_clip": {"clip_id": 2},
+                "sentence_ids": [11],
+                "t_first": 15.2,
+                "t_last": 16.5,
+                "prev_sentence_end": 14.8,
+                "next_sentence_start": 17.0,
+                "next_word_hard_wall": None,
+                "words": [
+                    {"word": "也就是說我們的設備", "start": 15.2, "end": 16.5},
+                ],
+                "transcript": "也就是說我們的設備",
+                "asr_transcript": "也就是說我們的設備",
+                "trimmed_head": False,
+                "trimmed_tail": False,
+                "composite_role": "none",
+                "is_composite_splice": False,
+                "llm_verified_window": False,
+            },
+            {
+                "parent_clip": {"clip_id": 2},
+                "sentence_ids": [12],
+                "t_first": 17.0,
+                "t_last": 22.0,
+                "prev_sentence_end": 16.5,
+                "next_sentence_start": 23.0,
+                "next_word_hard_wall": None,
+                "words": [
+                    {"word": "也就是說我們的設備會公開廣播通道摘要。", "start": 17.0, "end": 22.0},
+                ],
+                "transcript": "也就是說我們的設備會公開廣播通道摘要。",
+                "asr_transcript": "也就是說我們的設備會公開廣播通道摘要。",
+                "trimmed_head": False,
+                "trimmed_tail": False,
+                "composite_role": "none",
+                "is_composite_splice": False,
+                "llm_verified_window": False,
+            },
+        ]
+        occluded = occlude_expanded_sub_units(expanded)
+        self.assertEqual(len(occluded), 2)
+        self.assertEqual(occluded[0]["sentence_ids"], [10])
+        self.assertAlmostEqual(occluded[0]["t_last"], 13.0, places=2)
+        self.assertAlmostEqual(occluded[0]["next_word_hard_wall"], 13.199, places=2)
+        self.assertIn("asr_transcript", occluded[0])
+        self.assertEqual(occluded[1]["sentence_ids"], [12])
+        self.assertAlmostEqual(occluded[1]["t_first"], 17.0, places=2)
+
+    def test_parse_gemini_json_text_handles_comma_separated_objects_and_bare_arrays(self):
+        """Wrap bare JSON arrays and comma-separated JSON objects into {'final_edl': [...]}."""
+        from scripts.video_trimmer import _parse_gemini_json_text
+
+        comma_objs = '{"clip_id": 1, "sentence_ids": [1]}, {"clip_id": 2, "sentence_ids": [2]}'
+        parsed_a = _parse_gemini_json_text(comma_objs)
+        self.assertEqual(len(parsed_a["final_edl"]), 2)
+
+        bare_list = '[{"clip_id": 1, "sentence_ids": [3]}]'
+        parsed_b = _parse_gemini_json_text(bare_list)
+        self.assertEqual(parsed_b["final_edl"][0]["sentence_ids"], [3])
+
+    def test_script_phrase_multiplicity_flags_duplicate_clause_and_exempts_legitimate_repetition(self):
+        """Flag single-occurrence script clauses spoken in two clips, while exempting legitimately repeated script clauses."""
+        script = "系統會將資料精準送到裝置，而主機為了把資料更精準送到裝置，會先向周邊裝置詢問狀態。"
+        units = [
+            {"id": 1, "start": 0.0, "end": 4.0, "text": "系統會將資料精準送到裝置，", "is_target_speaker": True},
+            {"id": 2, "start": 4.2, "end": 8.0, "text": "而主機為了把資料更精準送到裝置，", "is_target_speaker": True},
+            {"id": 3, "start": 8.2, "end": 11.5, "text": "會先向周邊裝置詢問狀態，", "is_target_speaker": True},
+            {"id": 4, "start": 12.0, "end": 15.5, "text": "會先向周邊裝置詢問狀態。", "is_target_speaker": True},
+        ]
+
+        # Legitimate repetition ("資料精準送到裝置" / "精準送到裝置" appears twice in script, even with 1-char ASR homophone)
+        clean_edl = {
+            "final_edl": [
+                {"clip_id": 1, "sentence_ids": [1], "transcript": "系統會將資料精準送到裝置，", "asr_transcript": "系統會將資料精準送到裝置"},
+                {"clip_id": 2, "sentence_ids": [2, 4], "transcript": "而主機為了把資料更精準送到裝置，會先向周邊裝置詢問狀態。", "asr_transcript": "而主機為了把資寮更精準送到裝置會先向周邊裝置詢問狀態"},
+            ]
+        }
+        anomalies_clean = detect_micro_window_anomalies(clean_edl, units, total_dur=20.0, script_text=script)
+        mult_clean = [a for a in anomalies_clean if "SCRIPT_PHRASE_MULTIPLICITY" in a.get("sub_types", [a["type"]])]
+        self.assertEqual(len(mult_clean), 0)
+
+        # Duplicate retake of single-occurrence clause ("會先向周邊裝置詢問狀態" appears once in script, twice in EDL)
+        dup_edl = {
+            "final_edl": [
+                {"clip_id": 1, "sentence_ids": [1, 2, 3], "transcript": "系統會將資料精準送到裝置，而主機為了把資料更精準送到裝置，會先向周邊裝置詢問狀態，", "asr_transcript": "系統會將資料精準送到裝置而主機為了把資料更精準送到裝置會先向周邊裝置詢問狀態"},
+                {"clip_id": 2, "sentence_ids": [4], "transcript": "會先向周邊裝置詢問狀態。", "asr_transcript": "會先向周邊裝置詢問狀態"},
+            ]
+        }
+        anomalies_dup = detect_micro_window_anomalies(dup_edl, units, total_dur=20.0, script_text=script)
+        mult_dup = [a for a in anomalies_dup if "SCRIPT_PHRASE_MULTIPLICITY" in a.get("sub_types", [a["type"]])]
+        self.assertEqual(len(mult_dup), 1)
+
+    def test_unscripted_extraneous_span_flags_asr_leak_and_false_start_but_exempts_particles(self):
+        """Flag unscripted >= 6-char false starts and ASR alignment leaks, while exempting short spoken particles and homophones."""
+        script = "控制器收到封包之後，就能即時計算通道狀態並完成同步。"
+        units = [
+            {"id": 1, "start": 0.0, "end": 5.0, "text": "啊控制器收到封包之後呢，", "is_target_speaker": True},
+            {"id": 2, "start": 5.2, "end": 10.0, "text": "就能即時計算通道狀態並完成同步。", "is_target_speaker": True},
+            {"id": 3, "start": 10.5, "end": 16.0, "text": "我們先重講這一段控制器收到封包之後，", "is_target_speaker": True},
+        ]
+
+        # Short spoken particles ("啊", "呢") and homophone ("即實" vs "即時") -> 0 anomalies
+        clean_edl = {
+            "final_edl": [
+                {"clip_id": 1, "sentence_ids": [1, 2], "transcript": "啊控制器收到封包之後呢，就能即時計算通道狀態並完成同步。", "asr_transcript": "啊控制器收到封包之後呢就能即實計算通道狀態並完成同步"},
+            ]
+        }
+        anomalies_clean = detect_micro_window_anomalies(clean_edl, units, total_dur=20.0, script_text=script)
+        ext_clean = [a for a in anomalies_clean if "UNSCRIPTED_EXTRANEOUS_SPAN" in a.get("sub_types", [a["type"]])]
+        self.assertEqual(len(ext_clean), 0)
+
+        # Unscripted >= 6-char false-start prefix ("我們先重講這一段") -> flagged
+        bad_edl = {
+            "final_edl": [
+                {"clip_id": 1, "sentence_ids": [3, 2], "transcript": "控制器收到封包之後，就能即時計算通道狀態並完成同步。", "asr_transcript": "我們先重講這一段控制器收到封包之後就能即時計算通道狀態並完成同步"},
+            ]
+        }
+        anomalies_bad = detect_micro_window_anomalies(bad_edl, units, total_dur=20.0, script_text=script)
+        ext_bad = [a for a in anomalies_bad if "UNSCRIPTED_EXTRANEOUS_SPAN" in a.get("sub_types", [a["type"]])]
+        self.assertEqual(len(ext_bad), 1)
+
+    def test_closed_loop_post_alignment_verification_catches_physical_span_leak(self):
+        """Verify _expand_and_occlude_edl_clips + _sub_units_to_aligned_edl exposes off-by-one physical word leaks before GCS cleanup."""
+        from scripts.video_trimmer import _expand_and_occlude_edl_clips, _sub_units_to_aligned_edl
+
+        script = "第一階段負責資料擷取，第二階段負責特徵轉換。"
+        w_units = [
+            {
+                "id": 1,
+                "start": 0.0,
+                "end": 3.5,
+                "text": "等一下我們先重講這一段剛剛講太快了，",
+                "is_target_speaker": True,
+                "words": [{"word": "等一下我們先重講這一段剛剛講太快了，", "start": 0.0, "end": 3.5}],
+            },
+            {
+                "id": 2,
+                "start": 4.0,
+                "end": 7.0,
+                "text": "第一階段負責資料擷取，",
+                "is_target_speaker": True,
+                "words": [{"word": "第一階段負責資料擷取，", "start": 4.0, "end": 7.0}],
+            },
+            {
+                "id": 3,
+                "start": 7.2,
+                "end": 10.5,
+                "text": "第二階段負責特徵轉換。",
+                "is_target_speaker": True,
+                "words": [{"word": "第二階段負責特徵轉換。", "start": 7.2, "end": 10.5}],
+            },
+        ]
+        # Off-by-one Sentence ID hallucination: LLM wrote clean script text for ID 2, but pointed sentence_ids at NG ID 1
+        raw_edl = {
+            "final_edl": [
+                {"clip_id": 1, "topic": "Stage 1", "sentence_ids": [1], "transcript": "第一階段負責資料擷取，"},
+                {"clip_id": 2, "topic": "Stage 2", "sentence_ids": [3], "transcript": "第二階段負責特徵轉換。"},
+            ]
+        }
+        pre_anomalies = detect_micro_window_anomalies(raw_edl, w_units, total_dur=12.0, script_text=script)
+        self.assertEqual(len(pre_anomalies), 0)
+
+        preview_units = _expand_and_occlude_edl_clips(raw_edl, w_units, total_dur=12.0, script_text=script)
+        aligned_edl = _sub_units_to_aligned_edl(raw_edl, preview_units)
+        post_anomalies = detect_micro_window_anomalies(aligned_edl, w_units, total_dur=12.0, script_text=script)
+        post_types = {t for a in post_anomalies for t in a.get("sub_types", [a["type"]])}
+        self.assertIn("UNSCRIPTED_EXTRANEOUS_SPAN", post_types)

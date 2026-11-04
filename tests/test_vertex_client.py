@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from scripts.exceptions import GeminiAPIError
 from scripts.gemini_client import (
+    EDL_RESPONSE_SCHEMA,
     _extract_text_from_response,
     get_gemini_client,
     load_env_file,
@@ -135,6 +136,7 @@ class TestVertexClient(unittest.TestCase):
         mock_types.AutomaticFunctionCallingConfig.assert_called_once_with(disable=True)
         mock_types.GenerateContentConfig.assert_called_once_with(
             response_mime_type="application/json",
+            response_schema=EDL_RESPONSE_SCHEMA,
             temperature=0.0,
             max_output_tokens=65536,
             thinking_config=mock_types.ThinkingConfig.return_value,
@@ -173,6 +175,7 @@ class TestVertexClient(unittest.TestCase):
         mock_types.VideoMetadata.assert_called_once_with(start_offset="854s", end_offset="1382s")
         mock_types.GenerateContentConfig.assert_called_once_with(
             response_mime_type="application/json",
+            response_schema=EDL_RESPONSE_SCHEMA,
             temperature=0.0,
             max_output_tokens=65536,
             thinking_config=mock_types.ThinkingConfig.return_value,

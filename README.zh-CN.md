@@ -34,8 +34,8 @@ flowchart TD
 
     subgraph L1["Layer 1: 双引擎纯声学与标点子句切分 (chirp3_asr / transcribe)"]
         W_ASR["双引擎逐词声学转录<br/>(默认: Cloud STT V2 Chirp 3 0.001s | 可选: Whisper)"]:::stage1Style
-        S_SEG["物理边界 Sentence ID 切分<br/>(换气停顿 >=0.20s、拉长音、标点与连词黏合)"]:::stage1Style
-        W_JSON["中间产物: <basename>_whisper_raw.json<br/>(含 asr_engine 标记之声学基准与候选句索引)"]:::artifactStyle
+        S_SEG["物理边界 Sentence ID 切分<br/>(换气停顿 >=0.20s、拉长音与通用标点边界)"]:::stage1Style
+        W_JSON["中间产物: <basename>_words.json 与 _sentences.json<br/>(含 asr_engine 标记之声学基准与候选句索引)"]:::artifactStyle
         W_ASR --> S_SEG --> W_JSON
     end
 

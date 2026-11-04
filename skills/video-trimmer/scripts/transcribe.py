@@ -199,16 +199,16 @@ CLAUSE_PUNCT = ("，", ",", "、", "；", ";", "：", ":")
 
 def _split_sentence_on_paused_restarts(
     sentence_data: dict,
-    min_pause_sec: float = 0.22,
+    min_pause_sec: float = 0.18,
     min_clause_chars: int = 5,
 ) -> list[dict]:
     """
-    Split a merged sentence at physical intra-sentence pauses, stretched onsets, or punctuation boundaries.
+    Split a merged sentence at physical intra-sentence pauses, stretched syllables, or punctuation boundaries.
 
     ASD-STE100:
     1. Split unconditionally after sentence-ending closure punctuation when trailing words follow.
-    2. Split after clause comma punctuation when accompanied by a micro-pause (>= 0.10s).
-    3. Split at physical silence gaps (>= min_pause_sec) or stretched word onsets without semantic guessing.
+    2. Split after clause comma punctuation when accompanied by a micro-pause (>= 0.03s) or comma-absorbed pause duration (>= 0.22s/char).
+    3. Split at physical silence gaps (>= min_pause_sec), stretched word onsets, or pre-boundary hesitation drags without semantic string guessing.
     """
     words = sentence_data.get("words", [])
     if len(words) < 2:
@@ -220,6 +220,15 @@ def _split_sentence_on_paused_restarts(
     for j in range(1, len(words)):
         prev_word_raw = str(words[j - 1].get("word", "")).strip()
         gap = float(words[j].get("start", 0.0)) - float(words[j - 1].get("end", 0.0))
+        prev_w_dur = float(words[j - 1].get("end", 0.0)) - float(words[j - 1].get("start", 0.0))
+        prev_w_chars = max(1, len(normalize_text(prev_word_raw)))
+        prev_w_dur_per_char = prev_w_dur / prev_w_chars
+        prev_w_comma_pause = (gap >= 0.12) or ((prev_w_dur_per_char + max(0.0, gap)) >= 0.32) or (prev_w_dur_per_char >= 0.25)
+        prev_w_hesitation_drag = (
+            (prev_w_dur_per_char >= 0.275 and gap >= 0.06)
+            or (prev_w_dur_per_char >= 0.31 and gap >= 0.035)
+        )
+
         word_dur = float(words[j].get("end", 0.0)) - float(words[j].get("start", 0.0))
         w_chars = max(1, len(normalize_text(words[j].get("word", ""))))
         is_stretched_onset = (word_dur >= 1.20) and ((word_dur / w_chars) >= 0.45)
@@ -229,25 +238,37 @@ def _split_sentence_on_paused_restarts(
         prev_norm = normalize_text(prev_text)
         rem_norm = normalize_text(rem_text)
 
-        # 1. Closure punctuation inside a segment (isolates trailing confirmation words such as "...。對")
+        # 1. Closure punctuation inside a segment isolates trailing confirmation words
         if any(prev_word_raw.endswith(p) for p in CLOSURE_PUNCT):
             if len(prev_norm) >= 2 and len(rem_norm) >= 1:
                 split_word_indices.append(j)
                 seg_start_idx = j
                 continue
 
-        # 2. Clause comma punctuation with micro-pause
-        if any(prev_word_raw.endswith(p) for p in CLAUSE_PUNCT) and gap >= 0.10:
-            if len(prev_norm) >= 6 and len(rem_norm) >= 4:
+        # 2. Clause comma punctuation with breath micro-pause or CTC comma-absorbed pause duration
+        if any(prev_word_raw.endswith(p) for p in CLAUSE_PUNCT) and prev_w_comma_pause:
+            if len(prev_norm) >= 6 and len(rem_norm) >= 2:
                 split_word_indices.append(j)
                 seg_start_idx = j
                 continue
 
-        # 3. Physical pause or stretched onset separating two clauses
+        # 3a. Opening 2-to-5 char syllable lengthening with micro-gap indicates vocal hesitation cutoff
+        if (
+            prev_w_hesitation_drag
+            and 2 <= len(prev_norm) <= 5
+            and (len(prev_norm) <= 4 or gap >= 0.06)
+            and len(rem_norm) >= 4
+        ):
+            split_word_indices.append(j)
+            seg_start_idx = j
+            continue
+
+        # 3b. Physical silence pause or stretched onset separating two clauses
         has_physical_pause = (gap >= min_pause_sec) or is_stretched_onset
         if not has_physical_pause:
             continue
-        if len(prev_norm) < min_clause_chars or len(rem_norm) < min_clause_chars:
+        req_prev = 3 if gap >= 0.25 else min_clause_chars
+        if len(prev_norm) < req_prev or len(rem_norm) < min_clause_chars:
             continue
 
         split_word_indices.append(j)
@@ -327,6 +348,14 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
             fw_chars = max(1, len(normalize_text(fw.get("word", ""))))
             first_w_stretched = (fw_dur >= 1.20) and ((fw_dur / fw_chars) >= 0.45)
 
+        last_w_comma_pause = gap >= 0.12
+        if curr["words"]:
+            lw = curr["words"][-1]
+            lw_dur = float(lw.get("end", 0.0)) - float(lw.get("start", 0.0))
+            lw_chars = max(1, len(normalize_text(lw.get("word", ""))))
+            lw_per_char = lw_dur / lw_chars
+            last_w_comma_pause = last_w_comma_pause or ((lw_per_char + max(0.0, gap)) >= 0.32) or (lw_per_char >= 0.25)
+
         should_split = False
         # Rule 1: Physical respiration pause or stretched onset
         if (
@@ -341,9 +370,10 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
         # Rule 3a: Sentence-ending closure punctuation splits unconditionally
         elif any(curr_text.endswith(p) for p in CLOSURE_PUNCT):
             should_split = True
-        # Rule 3b: Clause comma punctuation with micro-pause provides clean clause bricks for LLM selection
+        # Rule 3b: Clause comma punctuation with breath pause or comma-absorbed pause duration
         elif any(curr_text.endswith(p) for p in CLAUSE_PUNCT) and (
-            (curr_norm_len >= 8 and gap >= 0.08) or gap >= 0.18
+            (curr_norm_len >= 6 and s_norm_len >= 2 and last_w_comma_pause)
+            or gap >= 0.18
         ):
             should_split = True
 
@@ -446,19 +476,27 @@ def transcribe_video_words(
     ASD-STE100:
     1. Default to Google Cloud Speech-to-Text V2 Chirp 3 (`asr_engine="chirp3"`) with millisecond precision.
     2. Fail fast with VideoTrimmerError on Cloud STT/GCS/ADC errors without falling back to Whisper.
-    3. Tag `<basename>_whisper_raw.json` with `asr_engine` while remaining backward-compatible with list caches.
+    3. Tag `<basename>_words.json` with `asr_engine` and migrate legacy `<basename>_whisper_raw.json` caches automatically.
     """
     video_path = Path(video_path)
     out_json = Path(out_json_path)
-    sentences_json = out_json.parent / f"{video_path.stem}_whisper_sentences.json"
+    sentences_json = out_json.parent / f"{video_path.stem}_sentences.json"
+    legacy_json = out_json.parent / f"{video_path.stem}_whisper_raw.json"
     engine = (asr_engine or DEFAULT_ASR_ENGINE).strip().lower()
     if engine not in ("chirp3", "whisper"):
         raise VideoTrimmerError(f"Unsupported ASR engine '{asr_engine}'. Expected 'chirp3' or 'whisper'.")
 
     raw_results = None
-    if out_json.exists() and not force:
+    cache_source = None
+    if not force:
+        if out_json.exists():
+            cache_source = out_json
+        elif legacy_json.exists() and legacy_json != out_json:
+            cache_source = legacy_json
+
+    if cache_source is not None:
         try:
-            with open(out_json, "r", encoding="utf-8") as f:
+            with open(cache_source, "r", encoding="utf-8") as f:
                 cached_payload = json.load(f)
             if isinstance(cached_payload, list):
                 cached_engine = "whisper"
@@ -471,8 +509,17 @@ def transcribe_video_words(
                 cached_segments = []
 
             if cached_engine == engine and cached_segments:
-                logger.info("Loading cached %s word timestamps: %s", engine, out_json.name)
+                logger.info("Loading cached %s word timestamps: %s", engine, cache_source.name)
                 raw_results = cached_segments
+                if cache_source == legacy_json and out_json != legacy_json and not out_json.exists():
+                    migrated_obj = (
+                        cached_payload
+                        if isinstance(cached_payload, dict)
+                        else {"asr_engine": cached_engine, "language": language, "segments": cached_segments}
+                    )
+                    with open(out_json, "w", encoding="utf-8") as mf:
+                        json.dump(migrated_obj, mf, ensure_ascii=False, indent=2)
+                    logger.info("Migrated legacy word timestamp cache %s -> %s", legacy_json.name, out_json.name)
             elif cached_segments:
                 logger.info(
                     "Cached word timestamps engine mismatch (cached=%s, requested=%s); re-transcribing...",
@@ -480,7 +527,7 @@ def transcribe_video_words(
                     engine,
                 )
         except Exception as exc:
-            logger.warning("Failed to read cached word timestamps %s (%s); re-transcribing...", out_json.name, exc)
+            logger.warning("Failed to read cached word timestamps %s (%s); re-transcribing...", cache_source.name, exc)
 
     if raw_results is None:
         if engine == "chirp3":
@@ -618,7 +665,7 @@ def format_whisper_transcript_for_prompt(whisper_sentences):
         "3. Exclude between-take chatter, throat clearing, and self-correction remarks directed to off-screen staff.",
         "4. Full Retake Dominance: when a later `Sentence ID` restarts the same sentence or script block from the beginning and completes it, exclude all earlier attempts and keep ONLY the final complete take.",
         "5. Partial Tail Pick-Up Backfill: when the latest `Sentence ID` is a partial pick-up covering ONLY the unfinished second half, emit the clean opening prefix (`\"composite_role\": \"prefix\"`) from the preceding attempt followed by the latest continuation (`\"composite_role\": \"continuation\"`) with zero repeated words.",
-        "6. In `final_edl`, list the exact retained `Sentence ID` integers in `sentence_ids` (and set `start_sentence_id` and `end_sentence_id`), write ONLY the clean retained spoken words in `transcript`, and align `source_in` and `source_out` to the sentence timestamps:\n",
+        "6. In `final_edl`, list ONLY contiguous retained `Sentence ID` integers in `sentence_ids` (never skip a `Sentence ID` inside one clip; emit separate clips for separate physical takes), write ONLY the clean retained spoken words in `transcript`, and align `source_in` and `source_out` to the sentence timestamps:\n",
     ]
     for s in whisper_sentences:
         lines.append(f"[Sentence ID: {s['id']:3d}] {s['start']:6.2f}s -> {s['end']:6.2f}s | {s['text']}")
@@ -808,7 +855,7 @@ def _find_best_char_span(
 
     min_block = 1 if t_len <= 3 else 2
 
-    def _span_in_slice(w_slice: str, offset: int) -> tuple[int, int, int] | None:
+    def _span_in_slice(w_slice: str, offset: int) -> tuple[int, int, int, int, int] | None:
         matcher = difflib.SequenceMatcher(None, tgt_norm, w_slice, autojunk=False)
         blocks = [b for b in matcher.get_matching_blocks() if b.size >= min_block]
         if not blocks:
@@ -816,10 +863,11 @@ def _find_best_char_span(
         m_chars = sum(b.size for b in blocks)
         raw_first = offset + blocks[0].b
         raw_last = offset + min(len(w_slice) - 1, blocks[-1].b + blocks[-1].size - 1)
+        raw_span = raw_last - raw_first + 1
 
         first_p = raw_first
         lead_unmatched = blocks[0].a
-        if 0 < lead_unmatched <= 2 and m_chars >= max(2, t_len - 2):
+        if 0 < lead_unmatched <= 2 and m_chars >= max(2, int(t_len * 0.70)):
             for step_back in range(1, lead_unmatched + 1):
                 cand_idx = raw_first - step_back
                 if cand_idx < offset:
@@ -834,7 +882,7 @@ def _find_best_char_span(
 
         last_p = raw_last
         tail_unmatched = t_len - (blocks[-1].a + blocks[-1].size)
-        if 0 < tail_unmatched <= 2 and m_chars >= max(2, t_len - 2):
+        if 0 < tail_unmatched <= 2 and m_chars >= max(2, int(t_len * 0.70)):
             max_slice_idx = offset + len(w_slice) - 1
             for step_fwd in range(1, tail_unmatched + 1):
                 cand_idx = raw_last + step_fwd
@@ -848,13 +896,14 @@ def _find_best_char_span(
                         break
                 last_p = cand_idx
 
-        return first_p, last_p, m_chars
+        comp = (raw_first - first_p) + (last_p - raw_last)
+        return first_p, last_p, m_chars, raw_span, comp
 
     full_res = _span_in_slice(whisper_str, 0)
     if full_res is None:
         return None
 
-    best_first, best_last, best_matched = full_res
+    best_first, best_last, best_matched, best_raw_span, best_comp = full_res
 
     # 2. When whisper_str is longer than tgt_norm, scan rightmost bounded windows down from w_len - t_len
     #    so short 1-to-4 char opening stutters are skipped even when homophones prevent rfind.
@@ -867,22 +916,29 @@ def _find_best_char_span(
             cand = _span_in_slice(whisper_str[start_idx:end_idx], start_idx)
             if cand is None:
                 continue
-            c_first, c_last, c_matched = cand
-            c_span = c_last - c_first + 1
-            best_span = best_last - best_first + 1
+            c_first, c_last, c_matched, c_raw_span, c_comp = cand
 
             is_better = False
             if c_matched >= min_match_floor:
                 if c_matched > best_matched:
                     is_better = True
                 elif c_matched == best_matched:
-                    if c_span < best_span or (c_span == best_span and c_first > best_first):
+                    if c_raw_span < best_raw_span:
                         is_better = True
-                elif c_matched == best_matched - 1 and c_span <= best_span - 4:
+                    elif c_raw_span == best_raw_span:
+                        if c_comp > best_comp or (c_comp == best_comp and c_first > best_first):
+                            is_better = True
+                elif c_matched == best_matched - 1 and c_raw_span <= best_raw_span - 4:
                     is_better = True
 
             if is_better:
-                best_first, best_last, best_matched = c_first, c_last, c_matched
+                best_first, best_last, best_matched, best_raw_span, best_comp = (
+                    c_first,
+                    c_last,
+                    c_matched,
+                    c_raw_span,
+                    c_comp,
+                )
 
     return best_first, best_last, best_matched
 
@@ -1046,18 +1102,156 @@ def _split_transcript_at_norm_index(transcript: str, split_norm_idx: int) -> tup
     return left_str, right_str
 
 
+def _slice_transcript_norm_range(transcript: str, start_norm_idx: int, end_norm_idx: int) -> str:
+    """Slice a display transcript to `[start_norm_idx, end_norm_idx)` in normalized character coordinates."""
+    norm_raw_indices = [
+        raw_i for raw_i, ch in enumerate(transcript) if re.match(r"[\w一-鿿]", ch)
+    ]
+    if not norm_raw_indices or start_norm_idx >= end_norm_idx or start_norm_idx >= len(norm_raw_indices):
+        return ""
+    raw_start = 0 if start_norm_idx <= 0 else norm_raw_indices[max(0, start_norm_idx)]
+    if end_norm_idx >= len(norm_raw_indices):
+        raw_end = len(transcript)
+    else:
+        next_char_raw = norm_raw_indices[end_norm_idx]
+        last_char_raw = norm_raw_indices[end_norm_idx - 1]
+        raw_end = last_char_raw + 1
+        while raw_end < next_char_raw and transcript[raw_end] in "。！？!?，,、；;：:%）)」』”’\"'":
+            raw_end += 1
+    return transcript[raw_start:raw_end].lstrip(" ，,、；;：:——-　").strip()
+
+
+def _align_multi_sentence_spans_to_transcript(
+    matched_sentences: list[dict],
+    transcript: str,
+    tgt_norm: str,
+) -> list[dict] | None:
+    """
+    Partition `transcript` monotonically from right to left across `matched_sentences` and align each sentence.
+
+    ASD-STE100:
+    1. Anchor from the rightmost sentence backward so shared boundary phrases belong to the latest take.
+    2. Align each sentence against its assigned slice of `transcript` without semantic retake guessing.
+    3. Record all unselected words across `matched_sentences` in `extra_bounds` to enforce physical hard walls.
+    """
+    if len(matched_sentences) < 2 or not tgt_norm:
+        return None
+
+    cur_end = len(tgt_norm)
+    reversed_groups: list[dict] = []
+    shared_extra_bounds: list[tuple[float, float]] = []
+    all_retained_keys: set[tuple[int, int]] = set()
+    total_matched_chars = 0
+
+    for k in range(len(matched_sentences) - 1, -1, -1):
+        s = matched_sentences[k]
+        s_id = int(s.get("id", 0))
+        s_words = s.get("words") or []
+        s_tl = _build_word_char_timeline([s])
+        s_str = "".join(item["ch"] for item in s_tl)
+
+        if not s_str or cur_end <= 0:
+            for w in s_words:
+                ws = float(w.get("start", 0.0))
+                shared_extra_bounds.append((ws, float(w.get("end", ws))))
+            continue
+
+        if k == 0:
+            p = 0
+        else:
+            win_cap = min(cur_end, max(len(s_str) + 8, int(len(s_str) * 1.25)))
+            win_offset = cur_end - win_cap
+            tgt_tail = tgt_norm[win_offset:cur_end]
+            min_blk = 1 if len(tgt_tail) <= 3 else 2
+            matcher = difflib.SequenceMatcher(None, tgt_tail, s_str, autojunk=False)
+            blocks = [b for b in matcher.get_matching_blocks() if b.size >= min_blk]
+            valid_end_blocks = [
+                idx_b for idx_b, b in enumerate(blocks)
+                if (len(tgt_tail) - (b.a + b.size)) <= 3
+            ]
+            if not valid_end_blocks:
+                # Sentence `s` does not cover the current suffix of `tgt_norm`; treat as omitted sentence
+                for w in s_words:
+                    ws = float(w.get("start", 0.0))
+                    shared_extra_bounds.append((ws, float(w.get("end", ws))))
+                continue
+
+            anchor_i = valid_end_blocks[-1]
+            first_blk = blocks[anchor_i]
+            matched_in_tail = first_blk.size
+            for idx_b in range(anchor_i - 1, -1, -1):
+                cand_b = blocks[idx_b]
+                gap_a = first_blk.a - (cand_b.a + cand_b.size)
+                if gap_a <= 3:
+                    first_blk = cand_b
+                    matched_in_tail += cand_b.size
+                else:
+                    break
+
+            if matched_in_tail < min(3, cur_end):
+                for w in s_words:
+                    ws = float(w.get("start", 0.0))
+                    shared_extra_bounds.append((ws, float(w.get("end", ws))))
+                continue
+
+            lead_comp = min(2, first_blk.a, first_blk.b) if first_blk.b <= 2 else 0
+            p = win_offset + max(0, first_blk.a - lead_comp)
+
+        sub_tgt = tgt_norm[p:cur_end]
+        if not sub_tgt:
+            for w in s_words:
+                ws = float(w.get("start", 0.0))
+                shared_extra_bounds.append((ws, float(w.get("end", ws))))
+            continue
+
+        sub_tr = _slice_transcript_norm_range(transcript, p, cur_end) or sub_tgt
+        sub_groups = _extract_matched_word_spans_by_transcript([s], sub_tr)
+        s_span = _find_best_char_span(sub_tgt, s_str, char_timeline=s_tl)
+        if s_span is not None:
+            total_matched_chars += min(len(sub_tgt), s_span[2])
+
+        s_kept_keys: set[tuple[int, int]] = set()
+        for sg in sub_groups:
+            s_kept_keys.update(sg.get("retained_keys") or set())
+            shared_extra_bounds.extend(sg.get("extra_bounds") or [])
+        for w_i, w in enumerate(s_words):
+            if (s_id, w_i) not in s_kept_keys:
+                ws = float(w.get("start", 0.0))
+                shared_extra_bounds.append((ws, float(w.get("end", ws))))
+
+        all_retained_keys.update(s_kept_keys)
+        for sg in reversed(sub_groups):
+            reversed_groups.append(sg)
+        cur_end = p
+
+    if not reversed_groups:
+        return None
+    if cur_end > max(3, int(len(tgt_norm) * 0.15)):
+        return None
+    if total_matched_chars < max(3, int(len(tgt_norm) * 0.75)):
+        return None
+
+    ordered_groups = list(reversed(reversed_groups))
+    for sg in ordered_groups:
+        sg["retained_keys"] = set(all_retained_keys)
+        sg["extra_bounds"] = list(shared_extra_bounds)
+    return ordered_groups
+
+
 def _extract_matched_word_spans_by_transcript(
     matched_sentences: list[dict],
     transcript: str,
 ) -> list[dict]:
     """
-    Extract one or two matched word-span groups from `matched_sentences` aligned to `transcript`.
+    Extract matched word-span groups from `matched_sentences` aligned to `transcript`.
 
     ASD-STE100:
     1. When `transcript` matches a compact contiguous span, return a single trimmed group.
     2. When `matched_sentences` contains a mid-sentence stumble (`A + B_ng + B_ok + C`) excised by
        `transcript` (`A + B_ok + C`), anchor `B_ok + C` at the rightmost take first and backfill `A`
        only if both sub-spans pass `is_viable_sub_span`.
+    3. When `matched_sentences` spans multiple sentences with multiple trimmed boundaries, partition
+       `transcript` monotonically from right to left across sentences.
     """
     def _full_passthrough() -> list[dict]:
         keys: set[tuple[int, int]] = set()
@@ -1202,6 +1396,12 @@ def _extract_matched_word_spans_by_transcript(
                         "extra_bounds": suf_extra,
                     }]
 
+    # Multi-sentence monotonic Right-to-Left alignment when multiple boundaries were trimmed
+    if len(matched_sentences) > 1:
+        multi_groups = _align_multi_sentence_spans_to_transcript(matched_sentences, transcript, tgt_norm)
+        if multi_groups:
+            return multi_groups
+
     # Fallback to single best span when matched_chars meets minimum requirement
     if span is not None and span[2] >= min_required:
         sliced, keys, extra_bounds = _slice_words_on_char_span(
@@ -1326,7 +1526,7 @@ def resolve_clip_sub_units(
             "next_word_hard_wall": None,
             "words": [],
             "transcript": raw_t,
-            "whisper_transcript": raw_t,
+            "asr_transcript": raw_t,
             "trimmed_head": bool(clip_data.get("trimmed_head", False)),
             "trimmed_tail": bool(clip_data.get("trimmed_tail", False)),
             "composite_role": parent_role,
@@ -1371,7 +1571,7 @@ def resolve_clip_sub_units(
             "next_word_hard_wall": None,
             "words": [],
             "transcript": raw_t,
-            "whisper_transcript": raw_t,
+            "asr_transcript": raw_t,
             "trimmed_head": bool(clip_data.get("trimmed_head", False)),
             "trimmed_tail": bool(clip_data.get("trimmed_tail", False)),
             "composite_role": parent_role,
@@ -1542,7 +1742,7 @@ def resolve_clip_sub_units(
             "next_word_hard_wall": None,
             "words": [],
             "transcript": clip_transcript,
-            "whisper_transcript": clip_transcript,
+            "asr_transcript": clip_transcript,
             "trimmed_head": bool(clip_data.get("trimmed_head", False)),
             "trimmed_tail": bool(clip_data.get("trimmed_tail", False)),
             "composite_role": parent_role,
@@ -1597,7 +1797,7 @@ def resolve_clip_sub_units(
             "next_word_hard_wall": next_start if (t_tail or c_role == "prefix") else None,
             "words": list(g.get("words", [])),
             "transcript": primary_transcript,
-            "whisper_transcript": sub_text or primary_transcript,
+            "asr_transcript": sub_text or primary_transcript,
             "trimmed_head": bool(g.get("trimmed_head", False)),
             "trimmed_tail": t_tail,
             "composite_role": c_role,
@@ -1660,12 +1860,21 @@ def coalesce_adjacent_sub_units(
             curr_text = (unit.get("transcript") or "").strip()
             if curr_text and curr_text not in prev_text:
                 prev["transcript"] = join_words_for_display([prev_text, curr_text])
-            prev_w_text = (prev.get("whisper_transcript") or "").strip()
-            curr_w_text = (unit.get("whisper_transcript") or "").strip()
+            prev_w_text = (prev.get("asr_transcript") or prev.get("whisper_transcript") or "").strip()
+            curr_w_text = (unit.get("asr_transcript") or unit.get("whisper_transcript") or "").strip()
             if curr_w_text and curr_w_text not in prev_w_text:
-                prev["whisper_transcript"] = join_words_for_display([prev_w_text, curr_w_text])
+                prev["asr_transcript"] = join_words_for_display([prev_w_text, curr_w_text])
+            elif prev_w_text:
+                prev["asr_transcript"] = prev_w_text
+            prev.pop("whisper_transcript", None)
         else:
-            coalesced.append(dict(unit))
+            u_copy = dict(unit)
+            if "asr_transcript" not in u_copy and "whisper_transcript" in u_copy:
+                u_copy["asr_transcript"] = u_copy.pop("whisper_transcript")
+            coalesced.append(u_copy)
+
+    if "asr_transcript" not in coalesced[0] and "whisper_transcript" in coalesced[0]:
+        coalesced[0]["asr_transcript"] = coalesced[0].pop("whisper_transcript")
 
     return coalesced
 
