@@ -1035,3 +1035,145 @@ class TestAuditEdlQuality(unittest.TestCase):
         post_anomalies = detect_micro_window_anomalies(aligned_edl, w_units, total_dur=12.0, script_text=script)
         post_types = {t for a in post_anomalies for t in a.get("sub_types", [a["type"]])}
         self.assertIn("UNSCRIPTED_EXTRANEOUS_SPAN", post_types)
+
+    def test_extend_omitted_adjacent_short_clauses_recovers_head_and_tail_clauses(self):
+        """Extend sentence_ids to include unclaimed opening or closing short clauses explicitly written in transcript."""
+        from scripts.video_trimmer import _expand_and_occlude_edl_clips
+
+        w_units = [
+            {
+                "id": 10,
+                "start": 40.00,
+                "end": 41.90,
+                "text": "盡管如此,這份報告揭露的是",
+                "is_target_speaker": True,
+                "words": [
+                    {"word": "盡管如此,", "start": 40.00, "end": 40.70},
+                    {"word": "這份報告揭露的是", "start": 40.75, "end": 41.90},
+                ],
+            },
+            {
+                "id": 11,
+                "start": 43.12,
+                "end": 43.84,
+                "text": "盡管如此,",
+                "is_target_speaker": True,
+                "words": [{"word": "盡管如此,", "start": 43.12, "end": 43.84}],
+            },
+            {
+                "id": 12,
+                "start": 43.88,
+                "end": 49.36,
+                "text": "這份報告揭露的是極具威脅的系統缺口啊,更麻煩的是標準",
+                "is_target_speaker": True,
+                "words": [
+                    {"word": "這份", "start": 43.88, "end": 44.30},
+                    {"word": "報告揭露的是極具威脅的系統缺口啊,", "start": 44.32, "end": 47.84},
+                    {"word": "更麻煩的是標準", "start": 48.10, "end": 49.36},
+                ],
+            },
+            {
+                "id": 20,
+                "start": 60.00,
+                "end": 64.00,
+                "text": "整個模組已經通過壓力測試,",
+                "is_target_speaker": True,
+                "words": [{"word": "整個模組已經通過壓力測試,", "start": 60.00, "end": 64.00}],
+            },
+            {
+                "id": 21,
+                "start": 64.15,
+                "end": 65.05,
+                "text": "表現非常穩定。",
+                "is_target_speaker": True,
+                "words": [{"word": "表現非常穩定。", "start": 64.15, "end": 65.05}],
+            },
+        ]
+
+        # 1. Fresh EDL output (no t_first/t_last yet): recovers head ID 11 and tail ID 21 while trimming ID 12 tail stumble
+        raw_edl = {
+            "final_edl": [
+                {
+                    "clip_id": 1,
+                    "topic": "Security Gap",
+                    "sentence_ids": [12],
+                    "transcript": "儘管如此，這份報告揭露的是極具威脅的系統缺口啊，",
+                },
+                {
+                    "clip_id": 2,
+                    "topic": "Stress Test",
+                    "sentence_ids": [20],
+                    "transcript": "整個模組已經通過壓力測試，表現非常穩定。",
+                },
+            ]
+        }
+        expanded_fresh = _expand_and_occlude_edl_clips(raw_edl, w_units, total_dur=70.0)
+        self.assertEqual(len(expanded_fresh), 2)
+        self.assertEqual(expanded_fresh[0]["sentence_ids"], [11, 12])
+        self.assertAlmostEqual(expanded_fresh[0]["t_first"], 43.12, places=2)
+        self.assertAlmostEqual(expanded_fresh[0]["t_last"], 47.84, places=2)
+        self.assertTrue(expanded_fresh[0]["trimmed_tail"])
+        self.assertFalse(expanded_fresh[0]["trimmed_head"])
+
+        self.assertEqual(expanded_fresh[1]["sentence_ids"], [20, 21])
+        self.assertAlmostEqual(expanded_fresh[1]["t_first"], 60.00, places=2)
+        self.assertAlmostEqual(expanded_fresh[1]["t_last"], 65.05, places=2)
+
+        # 2. Cached JSON replay (t_first/t_last and trimmed_tail=True already stored): still recovers ID 11 as one unified clip
+        cached_edl = {
+            "final_edl": [
+                {
+                    "clip_id": 1,
+                    "topic": "Security Gap",
+                    "sentence_ids": [12],
+                    "start_sentence_id": 12,
+                    "end_sentence_id": 12,
+                    "t_first": 43.88,
+                    "t_last": 47.84,
+                    "source_in": 43.80,
+                    "source_out": 47.90,
+                    "trimmed_head": False,
+                    "trimmed_tail": True,
+                    "transcript": "儘管如此，這份報告揭露的是極具威脅的系統缺口啊，",
+                    "asr_transcript": "這份報告揭露的是極具威脅的系統缺口啊,",
+                }
+            ]
+        }
+        expanded_cached = _expand_and_occlude_edl_clips(cached_edl, w_units, total_dur=70.0)
+        self.assertEqual(len(expanded_cached), 1)
+        self.assertEqual(expanded_cached[0]["sentence_ids"], [11, 12])
+        self.assertAlmostEqual(expanded_cached[0]["t_first"], 43.12, places=2)
+        self.assertAlmostEqual(expanded_cached[0]["t_last"], 47.84, places=2)
+
+    def test_extend_omitted_adjacent_short_clauses_rejects_ng_takes_long_gaps_and_claimed_ids(self):
+        """Never absorb longer NG sentences, pauses > 0.50s, claimed IDs, or composite/trimmed edges."""
+        w_units = [
+            # Case A: ID 1 is a longer aborted NG sentence (len 11 vs missing_head len 4), even within a short pause
+            {"id": 1, "start": 10.00, "end": 12.00, "text": "盡管如此,這份報告揭露的是", "is_target_speaker": True},
+            {"id": 2, "start": 12.20, "end": 16.00, "text": "這份報告揭露的是核心系統架構。", "is_target_speaker": True},
+            # Case B: ID 3 has pause gap 0.85s (> 0.50s) before ID 4
+            {"id": 3, "start": 20.00, "end": 20.70, "text": "換句話說,", "is_target_speaker": True},
+            {"id": 4, "start": 21.55, "end": 25.00, "text": "硬體延遲已經降到最低標準。", "is_target_speaker": True},
+            # Case C: ID 5 is already claimed by another clip; ID 7 is across a composite continuation seam
+            {"id": 5, "start": 30.00, "end": 30.60, "text": "總而言之,", "is_target_speaker": True},
+            {"id": 6, "start": 30.70, "end": 34.50, "text": "整體吞吐量提升了兩倍以上。", "is_target_speaker": True},
+            {"id": 7, "start": 40.00, "end": 40.60, "text": "也就是說,", "is_target_speaker": True},
+            {"id": 8, "start": 40.70, "end": 44.50, "text": "備援機制可以即時接手運算。", "is_target_speaker": True},
+        ]
+        clips = [
+            {"clip_id": 1, "sentence_ids": [2], "transcript": "儘管如此，這份報告揭露的是核心系統架構。"},
+            {"clip_id": 2, "sentence_ids": [4], "transcript": "換句話說，硬體延遲已經降到最低標準。"},
+            {"clip_id": 3, "sentence_ids": [5], "transcript": "總而言之，"},
+            {"clip_id": 4, "sentence_ids": [6], "transcript": "總而言之，整體吞吐量提升了兩倍以上。"},
+            {
+                "clip_id": 5,
+                "sentence_ids": [8],
+                "composite_role": "continuation",
+                "is_composite_splice": True,
+                "transcript": "也就是說，備援機制可以即時接手運算。",
+            },
+        ]
+        deduped = deduplicate_and_sort_clips(clips, w_units)
+        by_sids = [c["sentence_ids"] for c in deduped]
+        self.assertEqual(by_sids, [[2], [4], [5], [6], [8]])
+

@@ -1160,6 +1160,176 @@ def _detect_script_take_collisions(
     return collisions
 
 
+def _match_omitted_short_clause(cand_norm: str, missing_candidates: list[str]) -> bool:
+    """
+    Return True when normalized adjacent short-clause text matches an omitted transcript edge.
+
+    ASD-STE100:
+    1. Require 2-to-12 characters for CJK/Kana/Hangul clauses or 4-to-30 characters for Latin text.
+    2. Require tight length agreement with the adjacent physical sentence to reject longer NG takes.
+    3. Require >= 0.70 sequence similarity and at least 2 CJK (or 4 Latin) matched characters.
+    """
+    if not cand_norm:
+        return False
+    for missing in missing_candidates:
+        if not missing:
+            continue
+        is_cjk = any("\u3040" <= ch <= "\u9fff" or "\uac00" <= ch <= "\ud7af" for ch in missing)
+        if is_cjk:
+            if not (2 <= len(missing) <= 12):
+                continue
+            if abs(len(cand_norm) - len(missing)) > 2:
+                continue
+            min_matched = min(len(missing), 2)
+        else:
+            if not (4 <= len(missing) <= 30):
+                continue
+            if abs(len(cand_norm) - len(missing)) > 5:
+                continue
+            min_matched = min(len(missing), 4)
+
+        sm = difflib.SequenceMatcher(None, missing, cand_norm, autojunk=False)
+        matched_chars = sum(b.size for b in sm.get_matching_blocks())
+        if sm.ratio() >= 0.70 and matched_chars >= min_matched:
+            return True
+    return False
+
+
+def _extend_omitted_adjacent_short_clauses(
+    clips: list[dict],
+    whisper_units: list[dict],
+) -> list[dict]:
+    """
+    Extend `sentence_ids` by one unclaimed adjacent short clause when `transcript` explicitly includes it.
+
+    ASD-STE100:
+    1. Compare LLM `transcript` against the physical ASR text of `sentence_ids`.
+    2. Prepend `sids[0] - 1` or append `sids[-1] + 1` only when unclaimed, target-speaker,
+       within a 0.50s pause, <= 2.50s duration, and matching the omitted edge text (>= 0.70).
+    3. Never cross composite splice seams, trimmed edges, or neighboring clip time bounds.
+    """
+    if not clips or not whisper_units:
+        return clips
+
+    unit_by_id = {int(u["id"]): u for u in whisper_units if "id" in u}
+    if not unit_by_id:
+        return clips
+
+    claimed_ids: set[int] = set()
+    for c in clips:
+        claimed_ids.update(_resolve_clip_sentence_ids(c, whisper_units))
+
+    for idx, c in enumerate(clips):
+        sids = _resolve_clip_sentence_ids(c, whisper_units)
+        if not sids or sids[0] not in unit_by_id or sids[-1] not in unit_by_id:
+            continue
+
+        llm_text = (c.get("transcript") or "").strip()
+        t_norm = normalize_text(llm_text)
+        if len(t_norm) < 4:
+            continue
+
+        _, w_text = _clip_dual_texts(c, unit_by_id, whisper_units)
+        u_norm = normalize_text(w_text)
+        if not u_norm:
+            continue
+
+        blocks = [
+            b
+            for b in difflib.SequenceMatcher(None, t_norm, u_norm, autojunk=False).get_matching_blocks()
+            if b.size >= 2
+        ]
+        if not blocks or sum(b.size for b in blocks) < max(3, int(min(len(t_norm), len(u_norm)) * 0.50)):
+            continue
+
+        role = str(c.get("composite_role") or "none").strip().lower()
+        is_splice = bool(c.get("is_composite_splice", False))
+
+        # 1. Check omitted leading short clause (sids[0] - 1)
+        first_blk = blocks[0]
+        if not is_splice and role != "continuation" and not c.get("trimmed_head") and first_blk.b <= 2 and first_blk.a >= 2:
+            prev_sid = sids[0] - 1
+            prev_u = unit_by_id.get(prev_sid)
+            first_u = unit_by_id.get(sids[0])
+            if prev_sid not in claimed_ids and prev_u is not None and first_u is not None and prev_u.get("is_target_speaker", True):
+                prev_start = float(prev_u.get("start", 0.0))
+                prev_end = float(prev_u.get("end", prev_start))
+                first_start = float(first_u.get("start", prev_end))
+                gap_head = first_start - prev_end
+                dur_head = prev_end - prev_start
+                prev_clip_out = (
+                    _clip_time_bounds(clips[idx - 1], unit_by_id, whisper_units)[1]
+                    if idx > 0
+                    else -1.0
+                )
+                if -0.02 <= gap_head <= 0.50 and 0.05 <= dur_head <= 2.50 and prev_start >= prev_clip_out - 0.02:
+                    head_cands = [t_norm[:first_blk.a]]
+                    if 1 <= first_blk.b <= 2 and first_blk.a > first_blk.b:
+                        head_cands.append(t_norm[: first_blk.a - first_blk.b])
+                    cand_norm = normalize_text(str(prev_u.get("text", "")))
+                    if _match_omitted_short_clause(cand_norm, head_cands):
+                        sids = [prev_sid] + sids
+                        claimed_ids.add(prev_sid)
+                        c["sentence_ids"] = sids
+                        if c.get("start_sentence_id") is not None:
+                            c["start_sentence_id"] = sids[0]
+                        if c.get("t_first") is not None:
+                            c["t_first"] = prev_start
+                        if c.get("source_in") is not None and prev_start < float(c["source_in"]):
+                            c["source_in"] = prev_start
+                        c.pop("asr_transcript", None)
+                        c.pop("whisper_transcript", None)
+
+                        # Recompute alignment blocks before evaluating tail extension
+                        _, w_text = _clip_dual_texts(c, unit_by_id, whisper_units)
+                        u_norm = normalize_text(w_text)
+                        blocks = [
+                            b
+                            for b in difflib.SequenceMatcher(None, t_norm, u_norm, autojunk=False).get_matching_blocks()
+                            if b.size >= 2
+                        ]
+
+        # 2. Check omitted trailing short clause (sids[-1] + 1)
+        if blocks and role != "prefix" and not c.get("trimmed_tail"):
+            last_blk = blocks[-1]
+            rem_u = len(u_norm) - (last_blk.b + last_blk.size)
+            rem_t = len(t_norm) - (last_blk.a + last_blk.size)
+            if rem_u <= 2 and rem_t >= 2:
+                next_sid = sids[-1] + 1
+                next_u = unit_by_id.get(next_sid)
+                last_u = unit_by_id.get(sids[-1])
+                if next_sid not in claimed_ids and next_u is not None and last_u is not None and next_u.get("is_target_speaker", True):
+                    last_end = float(last_u.get("end", 0.0))
+                    next_start = float(next_u.get("start", last_end))
+                    next_end = float(next_u.get("end", next_start))
+                    gap_tail = next_start - last_end
+                    dur_tail = next_end - next_start
+                    next_clip_in = (
+                        _clip_time_bounds(clips[idx + 1], unit_by_id, whisper_units)[0]
+                        if idx + 1 < len(clips)
+                        else float("inf")
+                    )
+                    if -0.02 <= gap_tail <= 0.50 and 0.05 <= dur_tail <= 2.50 and next_end <= next_clip_in + 0.02:
+                        tail_cands = [t_norm[last_blk.a + last_blk.size :]]
+                        if 1 <= rem_u <= 2 and rem_t > rem_u:
+                            tail_cands.append(t_norm[last_blk.a + last_blk.size + rem_u :])
+                        cand_norm = normalize_text(str(next_u.get("text", "")))
+                        if _match_omitted_short_clause(cand_norm, tail_cands):
+                            sids = sids + [next_sid]
+                            claimed_ids.add(next_sid)
+                            c["sentence_ids"] = sids
+                            if c.get("end_sentence_id") is not None:
+                                c["end_sentence_id"] = sids[-1]
+                            if c.get("t_last") is not None:
+                                c["t_last"] = next_end
+                            if c.get("source_out") is not None and next_end > float(c["source_out"]):
+                                c["source_out"] = next_end
+                            c.pop("asr_transcript", None)
+                            c.pop("whisper_transcript", None)
+
+    return clips
+
+
 def deduplicate_and_sort_clips(
     clips: list[dict],
     whisper_units: list[dict],
@@ -1175,6 +1345,8 @@ def deduplicate_and_sort_clips(
     3. Deterministically drop an earlier clip only on physical time overlap or a near-verbatim
        (>= 85% block coverage and >= 85% similarity) full-block duplicate; route ambiguous
        semantic overlaps to `repair_edl_micro_windows` for LLM arbitration.
+    4. Extend `sentence_ids` to include an unclaimed adjacent short clause when `transcript`
+       explicitly contains that opening or closing clause.
     """
     if not clips:
         return []
@@ -1255,6 +1427,7 @@ def deduplicate_and_sort_clips(
         kept_earlier.append(curr)
         deduped = kept_earlier
 
+    deduped = _extend_omitted_adjacent_short_clauses(deduped, whisper_units)
     for idx, c in enumerate(deduped, start=1):
         c["clip_id"] = idx
     return deduped

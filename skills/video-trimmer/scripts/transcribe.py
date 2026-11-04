@@ -1622,8 +1622,8 @@ def resolve_clip_sub_units(
                 s_c["start"] = kept_w[0]["start"]
                 s_c["end"] = kept_w[-1]["end"]
                 s_c["text"] = join_words_for_display([x.get("word", "") for x in kept_w])
-                s_c["trimmed_head"] = bool(clip_data.get("trimmed_head", False))
-                s_c["trimmed_tail"] = bool(clip_data.get("trimmed_tail", False))
+                s_c["trimmed_head"] = kept_w[0]["start"] > float(s_words[0].get("start", 0.0)) + 0.005
+                s_c["trimmed_tail"] = kept_w[-1]["end"] < float(s_words[-1].get("end", 0.0)) - 0.005
                 windowed_matched.append(s_c)
         if windowed_matched:
             matched = windowed_matched
