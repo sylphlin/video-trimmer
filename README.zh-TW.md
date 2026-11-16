@@ -147,42 +147,33 @@ video-trimmer/
 │           └── video_cut_prompt.md          # 雙模式語意仲裁與局部補錄複合剪輯規範
 ├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
-└── tests/                                   # 離線單元測試套件（152 項測試）
+└── tests/                                   # 離線單元測試套件（155 項測試）
 ```
 
 ---
 
 ## 安裝與 Google Cloud 環境設定
 
-### 1. 安裝 FFmpeg
+### 1. 安裝 Antigravity Plugin
 
 ```bash
-# macOS (Homebrew)
-brew install ffmpeg
-
-# Ubuntu / Debian
-sudo apt update && sudo apt install -y ffmpeg
+agy plugin install https://github.com/sylphlin/video-trimmer
 ```
 
-### 2. 安裝為 Antigravity Plugin
+### 2. 安裝 Python 與影音媒體相依套件
+
+`requirements.txt` 已內含 `static-ffmpeg`：當系統未安裝 FFmpeg 時會自動提供跨平台 `ffmpeg` 與 `ffprobe` 執行檔；若系統已安裝原生 FFmpeg，則優先保留原生環境與硬體加速：
 
 ```bash
-# 全域 Antigravity Plugin（建議）
-git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
-
-# 舊版獨立 Skill 目錄安裝（~/.gemini/config/skills/ 相容方式）
-ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
-
-# 安裝核心 Python 相依套件（預設使用雲端 Chirp 3 + Vertex AI）
 pip install -r ~/.gemini/config/plugins/video-trimmer/requirements.txt
 
-# 選用：安裝本機 Whisper 轉錄套件（Apple Silicon Metal，供 --asr-engine whisper 使用）
+# 選用：本機 Whisper 轉錄套件（僅供 --asr-engine whisper 使用）
 pip install mlx-whisper
 ```
 
-### 3. 一鍵配置 Google Cloud 資源 (`./setup.sh`)
+### 3. 驗證 ADC 並配置 Google Cloud 資源 (`./setup.sh`)
 
-執行 `setup.sh` 自動啟用 Vertex AI、Cloud Speech-to-Text V2（`chirp_3`）與 Cloud Storage，並寫入 `.env` 設定：
+於 `~/.gemini/config/plugins/video-trimmer` 執行 `setup.sh`，自動啟用 Vertex AI、Cloud Speech-to-Text V2（`chirp_3`）與 Cloud Storage，並寫入 `.env` 設定：
 
 ```bash
 gcloud auth application-default login
@@ -276,7 +267,7 @@ chmod +x setup.sh
 
 ## 單元測試 (Unit Testing)
 
-提交變更前請執行完整離線單元測試套件（152 項測試）：
+提交變更前請執行完整離線單元測試套件（155 項測試）：
 
 ```bash
 python3 -m unittest discover -s tests -v

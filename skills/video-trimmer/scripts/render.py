@@ -2,6 +2,7 @@
 
 import json
 import logging
+import shutil
 import subprocess
 
 from pathlib import Path
@@ -16,8 +17,20 @@ MAX_HWACCEL_INPUTS = 16
 DEFAULT_RENDER_GOP = 30
 
 
+def ensure_ffmpeg_in_path() -> None:
+    """Add static-ffmpeg binaries to PATH when system ffmpeg or ffprobe is missing."""
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths(weak=True)
+    except ImportError:
+        pass
+
+
 def probe_video(video_path):
     """Probe video duration, frame dimensions, and frame rate via ffprobe."""
+    ensure_ffmpeg_in_path()
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration",
@@ -147,6 +160,7 @@ def render_cut_video(
     punch_in_scale: float = COMPOSITE_PUNCH_IN_SCALE,
 ):
     """Render the trimmed MP4 with keyframe input seeking, 1s GOP, and VideoToolbox acceleration."""
+    ensure_ffmpeg_in_path()
     n = len(edl)
     if n == 0:
         logger.warning("No selected clips available for rendering.")

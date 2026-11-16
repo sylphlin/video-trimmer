@@ -28,6 +28,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from .constants import DEFAULT_CHIRP3_MODEL, DEFAULT_STT_LOCATION
 from .exceptions import VideoTrimmerError
 from .gcs_utils import get_gcs_client
+from .render import ensure_ffmpeg_in_path
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,7 @@ def _parse_offset_seconds(offset_val) -> float:
 
 def _get_audio_duration(audio_path: str) -> float:
     """Probe audio duration in seconds with ffprobe."""
+    ensure_ffmpeg_in_path()
     cmd = [
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path),
@@ -508,6 +510,7 @@ def run_chirp3_transcription(
     temp_mp3 = os.path.join(tempfile.gettempdir(), f"chirp3_trimmer_{run_id}.mp3")
 
     try:
+        ensure_ffmpeg_in_path()
         ff_res = subprocess.run(
             [
                 "ffmpeg", "-y", "-i", str(media_path),

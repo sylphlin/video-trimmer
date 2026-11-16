@@ -75,7 +75,7 @@ from .gemini_client import (
     run_gemini_inference,
     stage_video_to_gcs,
 )
-from .render import probe_video, render_cut_video
+from .render import ensure_ffmpeg_in_path, probe_video, render_cut_video
 from .transcribe import (
     calculate_active_script_window,
     coalesce_adjacent_sub_units,
@@ -354,6 +354,7 @@ def _sub_units_to_aligned_edl(model_edl: dict, filtered_units: list[dict]) -> di
 
 
 def _run(args):
+    ensure_ffmpeg_in_path()
     load_env_file()
 
     if is_gdrive_source(args.input):
@@ -632,6 +633,7 @@ def _run(args):
 
     # Layer 3 & Layer 4: Sub-unit word trimming, cross-clip coalescing, and acoustic onset snapping
     logger.info("==> 5. Running text-locked word boundary trimming and acoustic onset snapping...")
+    ensure_ffmpeg_in_path()
     temp_wav = out_dir / f"temp_{base_name}.wav"
     wav_proc = subprocess.run(
         ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)],
@@ -849,6 +851,7 @@ def _run(args):
 
 
 def main():
+    ensure_ffmpeg_in_path()
     load_env_file()
     default_model = os.environ.get("MODEL_NAME") or os.environ.get("TRIMMER_MODEL") or "gemini-3.8-flash"
     env_asr = (os.environ.get("ASR_ENGINE") or DEFAULT_ASR_ENGINE).strip().lower()

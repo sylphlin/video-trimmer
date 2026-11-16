@@ -96,7 +96,7 @@ flowchart TD
 6. **음향 온셋 스내핑, 중첩 피벗 동기화, 20 ms 마이크로 페이드 및 선택적 1.12x 펀치인 (`acoustic.py` / `render.py`)**:
    - 휴지 후 부풀려진 단어 시작점 보정(`clamp_post_pause_word_onset`), 중첩 구간의 최소 RMS 에너지 지점 피벗 동기화(`find_optimal_overlap_pivot`), 음량 매칭(`compute_composite_gain_db`), Apple Silicon `VideoToolbox` 하드웨어 가속, 20 ms 등전력 마이크로 페이드 및 선택적 `--punch-in-composite`(복합 연속 클립 `1.12x` 짝수 픽셀 줌)를 수행합니다.
 7. **Agent Plugins 1.0 표준 아키텍처 및 멀티 NLE 타임라인 지원 (`exporters.py`)**:
-   - 핵심 스크립트(`chirp3_asr.py` 포함)와 프롬프트는 `skills/video-trimmer/`(SSOT)에 위치하며, `Composite Splice (Pick-up)` 타임라인 `<marker>`가 포함된 **FCP7 XML**, **FCPXML v1.9** 및 **CSV**를 내보냅니다(총 152개 오프라인 단위 테스트 통과).
+   - 핵심 스크립트(`chirp3_asr.py` 포함)와 프롬프트는 `skills/video-trimmer/`(SSOT)에 위치하며, `Composite Splice (Pick-up)` 타임라인 `<marker>`가 포함된 **FCP7 XML**, **FCPXML v1.9** 및 **CSV**를 내보냅니다(총 155개 오프라인 단위 테스트 통과).
 
 ---
 
@@ -116,21 +116,28 @@ flowchart TD
 
 ## 설치 및 Google Cloud 설정
 
+### 1. Antigravity Plugin 설치
+
 ```bash
-# 1. FFmpeg 설치 및 Agent Plugin으로 클론 (권장)
-brew install ffmpeg
-git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
+agy plugin install https://github.com/sylphlin/video-trimmer
+```
 
-# (선택 사항) 기존 단일 Skill 디렉터리 설치 (~/.gemini/config/skills/ 호환 방식)
-ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
+### 2. Python 및 미디어 의존성 설치
 
-# 핵심 Python 의존성 설치 (기본 클라우드 Chirp 3 + Vertex AI)
+`requirements.txt`에는 `static-ffmpeg`가 포함되어 있어 시스템에 FFmpeg가 없을 때 크로스 플랫폼 `ffmpeg` 및 `ffprobe` 바이너리를 자동으로 제공하며, 이미 설치된 경우 네이티브 FFmpeg와 하드웨어 가속을 그대로 유지합니다:
+
+```bash
 pip install -r ~/.gemini/config/plugins/video-trimmer/requirements.txt
 
-# (선택 사항) 로컬 Whisper 가속 백엔드 설치 (--asr-engine whisper 사용 시)
+# 선택 사항: 로컬 Whisper 가속 백엔드 (--asr-engine whisper 사용 시)
 pip install mlx-whisper
+```
 
-# 2. ADC 인증 및 setup.sh 실행 (Vertex AI, Cloud STT V2 Chirp 3, GCS 자동 구성)
+### 3. ADC 인증 및 Google Cloud 리소스 구성 (`./setup.sh`)
+
+`~/.gemini/config/plugins/video-trimmer` 디렉터리에서 `setup.sh`를 실행하여 Vertex AI, Cloud Speech-to-Text V2(`chirp_3`), Cloud Storage를 활성화하고 `.env` 파일을 생성합니다:
+
+```bash
 gcloud auth application-default login
 cd ~/.gemini/config/plugins/video-trimmer
 chmod +x setup.sh

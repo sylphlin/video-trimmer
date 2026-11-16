@@ -365,3 +365,48 @@ class TestCompositeMarkersAndPunchIn(unittest.TestCase):
             render_cut_video(edl, src_mp4, out_mp4, crf=24, punch_in_composite=True, width=854, height=480)
             self.assertTrue(out_mp4.exists())
             self.assertGreater(out_mp4.stat().st_size, 0)
+
+
+class TestEnsureFFmpegInPath(unittest.TestCase):
+    def test_skips_static_ffmpeg_when_ffmpeg_and_ffprobe_exist_on_path(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        from scripts.render import ensure_ffmpeg_in_path
+
+        mock_static_ffmpeg = MagicMock()
+        with (
+            patch("scripts.render.shutil.which", side_effect=lambda name: f"/usr/local/bin/{name}"),
+            patch.dict(sys.modules, {"static_ffmpeg": mock_static_ffmpeg}),
+        ):
+            ensure_ffmpeg_in_path()
+        mock_static_ffmpeg.add_paths.assert_not_called()
+
+    def test_calls_static_ffmpeg_add_paths_weak_when_either_binary_is_missing(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        from scripts.render import ensure_ffmpeg_in_path
+
+        for missing_bin in ("ffmpeg", "ffprobe"):
+            with self.subTest(missing=missing_bin):
+                mock_static_ffmpeg = MagicMock()
+                with (
+                    patch(
+                        "scripts.render.shutil.which",
+                        side_effect=lambda name, m=missing_bin: None if name == m else f"/usr/local/bin/{name}",
+                    ),
+                    patch.dict(sys.modules, {"static_ffmpeg": mock_static_ffmpeg}),
+                ):
+                    ensure_ffmpeg_in_path()
+                mock_static_ffmpeg.add_paths.assert_called_once_with(weak=True)
+
+    def test_handles_static_ffmpeg_import_error_gracefully(self):
+        import sys
+        from unittest.mock import patch
+        from scripts.render import ensure_ffmpeg_in_path
+
+        with (
+            patch("scripts.render.shutil.which", return_value=None),
+            patch.dict(sys.modules, {"static_ffmpeg": None}),
+        ):
+            ensure_ffmpeg_in_path()
+

@@ -96,7 +96,7 @@ flowchart TD
 6. **声学起音锁定、重叠切点同步、20 ms 微淡化与可选 1.12x 复合缩放遮瑕 (`acoustic.py` / `render.py`)**：
    - 修正停顿后虚胖起音（`clamp_post_pause_word_onset`）、在重叠词组的最低 RMS 能量谷同步切点（`find_optimal_overlap_pivot`）、匹配前后镜响度（`compute_composite_gain_db`），支持 Apple Silicon `VideoToolbox` 硬件加速、20 ms 等功率微淡化（`iqsin`/`qsin`）与可选 `--punch-in-composite`（`1.12x` 偶数像素裁剪放大遮瑕）。
 7. **Agent Plugins 1.0 标准架构与多平台 NLE 时间线导出 (`exporters.py`)**：
-   - 核心脚本与提示词位于 `skills/video-trimmer/scripts/`（含 `chirp3_asr.py`）与 `skills/video-trimmer/prompts/`（SSOT），支持导出带 `Composite Splice (Pick-up)` 时间线 `<marker>` 标记的 **FCP7 XML**、**FCPXML v1.9** 与 **CSV**，并通过全部 152 项离线单元测试。
+   - 核心脚本与提示词位于 `skills/video-trimmer/scripts/`（含 `chirp3_asr.py`）与 `skills/video-trimmer/prompts/`（SSOT），支持导出带 `Composite Splice (Pick-up)` 时间线 `<marker>` 标记的 **FCP7 XML**、**FCPXML v1.9** 与 **CSV**，并通过全部 155 项离线单元测试。
 
 ---
 
@@ -116,21 +116,28 @@ flowchart TD
 
 ## 安装与 Google Cloud 环境配置
 
+### 1. 安装 Antigravity Plugin
+
 ```bash
-# 1. 安装 FFmpeg 与克隆 Agent Plugin（推荐）
-brew install ffmpeg
-git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
+agy plugin install https://github.com/sylphlin/video-trimmer
+```
 
-# （可选）旧版独立 Skill 目录安装（~/.gemini/config/skills/ 兼容方式）
-ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
+### 2. 安装 Python 与音视频依赖
 
-# 安装核心 Python 依赖（默认使用云端 Chirp 3 + Vertex AI）
+`requirements.txt` 已包含 `static-ffmpeg`：当系统缺少 FFmpeg 时会自动提供跨平台 `ffmpeg` 与 `ffprobe` 可执行文件；若系统已安装原生 FFmpeg，则优先保留原生环境与硬件加速：
+
+```bash
 pip install -r ~/.gemini/config/plugins/video-trimmer/requirements.txt
 
-# （可选）安装本地 Whisper 加速后端（供 --asr-engine whisper 使用）
+# 可选：本地 Whisper 加速后端（仅限 --asr-engine whisper 使用）
 pip install mlx-whisper
+```
 
-# 2. 授权 ADC 并运行 setup.sh（自动启用 Vertex AI、Cloud STT V2 Chirp 3 与 GCS）
+### 3. 认证 ADC 并配置 Google Cloud 资源 (`./setup.sh`)
+
+进入 `~/.gemini/config/plugins/video-trimmer` 执行 `setup.sh`，自动启用 Vertex AI、Cloud Speech-to-Text V2（`chirp_3`）与 Cloud Storage 并生成 `.env` 配置：
+
+```bash
 gcloud auth application-default login
 cd ~/.gemini/config/plugins/video-trimmer
 chmod +x setup.sh

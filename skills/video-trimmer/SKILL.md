@@ -53,7 +53,7 @@ video-trimmer/
 ├── .env.example                      # Environment variables template for Vertex AI, STT V2 & GCS
 ├── setup.sh                          # 100% Native gcloud GCP provisioning script (Zero Terraform)
 ├── pyproject.toml                    # Standard Python packaging & CLI console scripts
-├── requirements.txt                  # Python runtime dependencies
+├── requirements.txt                  # Python & static-ffmpeg runtime dependencies
 └── tests/                            # Offline unit tests
 ```
 
@@ -95,12 +95,12 @@ Resolve `<PLUGIN_ROOT>` as the repository or plugin root located two levels abov
 Set the command working directory (`Cwd`) to `<PLUGIN_ROOT>` and invoke `python3 skills/video-trimmer/scripts/video_trimmer.py` directly. Do not search the filesystem with `find_by_name` or `list_dir` to locate the CLI entrypoint.
 
 ### Step 1: Environment Verification & GCP Native Setup
-Run a single pre-flight check in `<PLUGIN_ROOT>` to verify that FFmpeg and `.env` configuration exist:
+Run a single pre-flight check in `<PLUGIN_ROOT>` to verify that FFmpeg (system `ffmpeg` or `static-ffmpeg`) and `.env` configuration exist:
 ```bash
-# 1. Pre-flight verification (FFmpeg + .env configuration)
-ffmpeg -version >/dev/null && test -f .env && echo "Environment Ready"
+# 1. Pre-flight verification (FFmpeg or static-ffmpeg + .env configuration)
+(command -v ffmpeg >/dev/null || command -v static_ffmpeg >/dev/null || python3 -c "import static_ffmpeg" 2>/dev/null) && test -f .env && echo "Environment Ready"
 ```
-If `.env` is missing or Google Cloud credentials are not configured, run or instruct the user to run the one-click native `gcloud` setup:
+If Python or media dependencies are missing, run `pip install -r requirements.txt` (`static-ffmpeg` automatically provides `ffmpeg` and `ffprobe` when system FFmpeg is absent). If `.env` is missing or Google Cloud credentials are not configured, run or instruct the user to run the one-click native `gcloud` setup:
 ```bash
 # 2. Authenticate once with Google Cloud ADC
 gcloud auth application-default login

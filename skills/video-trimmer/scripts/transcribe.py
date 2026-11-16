@@ -26,6 +26,7 @@ from .constants import (
     DEFAULT_WHISPER_MODEL,
 )
 from .exceptions import VideoTrimmerError
+from .render import ensure_ffmpeg_in_path
 from .script_aligner import extract_script_blocks, normalize_text
 
 logger = logging.getLogger(__name__)
@@ -441,6 +442,7 @@ def _resolve_whisper_language_code(language: str | None) -> str | None:
 
 def _extract_mono_wav(video_path: Path, wav_path: Path) -> None:
     """Extract a 16kHz mono PCM WAV file from video_path via FFmpeg."""
+    ensure_ffmpeg_in_path()
     res = subprocess.run(
         [
             "ffmpeg", "-y", "-i", str(video_path),
@@ -474,6 +476,7 @@ def transcribe_video_words(
     2. Fail fast with VideoTrimmerError on Cloud STT/GCS/ADC errors without falling back to Whisper.
     3. Cache and validate `<basename>_words.json` strictly by matching its `asr_engine` metadata tag.
     """
+    ensure_ffmpeg_in_path()
     video_path = Path(video_path)
     out_json = Path(out_json_path)
     sentences_json = out_json.parent / f"{video_path.stem}_sentences.json"

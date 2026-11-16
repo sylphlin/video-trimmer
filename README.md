@@ -151,54 +151,37 @@ video-trimmer/
 ├── .env.example                             # Environment variables template for Vertex AI, STT V2, and GCS
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
-├── requirements.txt                         # Python dependencies
-└── tests/                                   # Offline unit test suite (152 tests)
+├── requirements.txt                         # Python and static-ffmpeg dependencies
+└── tests/                                   # Offline unit test suite (155 tests)
 ```
 
 ---
 
 ## Installation & Google Cloud Setup
 
-### 1. Install FFmpeg
-
-Install [FFmpeg](https://ffmpeg.org/) and verify that `ffmpeg` and `ffprobe` are in `PATH`:
+### 1. Install the Antigravity Plugin
 
 ```bash
-# macOS (Homebrew)
-brew install ffmpeg
-
-# Ubuntu / Debian
-sudo apt update && sudo apt install -y ffmpeg
+agy plugin install https://github.com/sylphlin/video-trimmer
 ```
 
-### 2. Install as an Antigravity Plugin
+### 2. Install Python and Media Dependencies
+
+`requirements.txt` includes `static-ffmpeg`, which automatically provides cross-platform `ffmpeg` and `ffprobe` binaries when system FFmpeg is absent while preserving native system FFmpeg and hardware acceleration when already installed:
 
 ```bash
-# Global Plugin (Recommended)
-git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
-
-# Or Workspace Plugin
-git clone https://github.com/sylphlin/video-trimmer.git .agents/plugins/video-trimmer
-
-# Legacy Single-Skill Installation (~/.gemini/config/skills/)
-ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
-
-# Install Core Python Dependencies (Cloud Chirp 3 + Vertex AI Default)
 pip install -r ~/.gemini/config/plugins/video-trimmer/requirements.txt
 
-# Optional: Install Local Whisper Backend (Apple Silicon Metal, for --asr-engine whisper)
+# Optional: Local Whisper backend (only for --asr-engine whisper)
 pip install mlx-whisper
 ```
 
-### 3. Provision Google Cloud Resources (`./setup.sh`)
+### 3. Authenticate ADC and Provision Google Cloud Resources (`./setup.sh`)
 
-Run `setup.sh` to enable Vertex AI, Cloud Speech-to-Text V2 (`chirp_3`), and Cloud Storage, and configure Application Default Credentials (ADC) using native `gcloud` commands:
+Run `setup.sh` inside `~/.gemini/config/plugins/video-trimmer` to enable Vertex AI, Cloud Speech-to-Text V2 (`chirp_3`), and Cloud Storage, and configure Application Default Credentials (ADC) using native `gcloud` commands:
 
 ```bash
-# Authenticate ADC
 gcloud auth application-default login
-
-# Provision APIs, STT V2 & GCS IAM roles, two-tier lifecycle rules (raw: 2d, deliverables: 15d), and .env
 cd ~/.gemini/config/plugins/video-trimmer
 chmod +x setup.sh
 ./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
@@ -289,7 +272,7 @@ For an input video `raw_footage.mp4`, the agent automatically creates an `output
 
 ## Unit Testing
 
-Run the offline test suite (152 tests) before committing changes:
+Run the offline test suite (155 tests) before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v
