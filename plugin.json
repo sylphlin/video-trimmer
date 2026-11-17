@@ -1,8 +1,10 @@
 {
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "video-trimmer",
   "displayName": "Video Trimmer",
   "version": "1.0.0",
+  "category": "productivity",
+  "logo": "assets/logo.svg",
   "description": "AI-Powered Smart Video Trimmer and rough-cut engine. Features Gemini 3.8 Flash Multimodal Video Understanding (native video, Last-Take-Wins with Composite Pick-Up Backfill), Dual-Engine Word-Level Acoustic Ground Truth (Google Cloud STT V2 Chirp 3 default; Whisper optional), acoustic onset snapping, 20ms equal-power audio micro-crossfades, and multi-format NLE export (Premiere Pro XML, DaVinci Resolve XML, Final Cut Pro FCPXML).",
   "suggestedPrompts": [
     "Trim @raw_footage.mp4 with @shooting_script.md and remove all stutters and retakes.",

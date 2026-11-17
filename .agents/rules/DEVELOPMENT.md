@@ -1,0 +1,71 @@
+---
+trigger: always_on
+---
+# Video Trimmer — Workspace & Development Rules
+
+This file defines the authoritative rules for AI Coding Agents working in this repository. It covers both **Client Execution Invariants** (when running the video trimming pipeline for end users) and **Repository Engineering Standards** (when developing, maintaining, or extending this project).
+
+---
+
+## Part I: Operational Invariants (When Executing Video Trimmer Tasks)
+
+1. **Strict Toolset Execution Only (No Ad-Hoc Scripts)**:
+   - Execute all video rough-cutting, take selection, acoustic onset snapping, NLE XML/FCPXML/CSV exporting, and video rendering exclusively via the official scripts in `skills/video-trimmer/scripts/`.
+   - Writing temporary Python scripts, ad-hoc regex deduplication, or custom audio/video trimming logic is **STRICTLY FORBIDDEN**.
+2. **Mandatory 3-Step Gated Workflow & Explicit ASR Engine Selection (Direct CLI Invocation)**:
+   - Resolve `<PLUGIN_ROOT>` as two directory levels above `skills/video-trimmer/SKILL.md` (`../../`, e.g., `~/.gemini/config/plugins/video-trimmer`).
+   - Follow the 3-Step Runbook defined in `skills/video-trimmer/SKILL.md`:
+     - **Step 1 (Environment & Cloud Auth Verification)**: Verify FFmpeg (system `ffmpeg` or `static-ffmpeg`), `gcloud` ADC credentials, and `.env` configuration (`GOOGLE_CLOUD_PROJECT`, `VIDEO_TRIMMER_BUCKET`, `STT_LOCATION`) from `<PLUGIN_ROOT>`.
+     - **Step 2 (Pipeline Execution)**: Run `python3 skills/video-trimmer/scripts/video_trimmer.py` (with `Cwd` set to `<PLUGIN_ROOT>`) directly via `run_command`. Default to Cloud Speech-to-Text V2 Chirp 3 (`--asr-engine chirp3`); pass `--asr-engine whisper` **ONLY** when the user explicitly requests Whisper or local ASR in their prompt. Pass `-s <SCRIPT_FILE>` whenever the user provides a shooting script or outline (Mode A: Monotonic Script-Anchored Alignment); omit `-s` for unscripted recordings (Mode B: Unscripted Intent-Window Arbitration). Run in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) unless `--agentic` is explicitly requested. By default, all deliverables are automatically isolated in `<input_dir>/output/` (`./output/` for Google Drive inputs).
+     - **Step 3 (Deliverable & `agent_verdict` Quality Gate Verification)**: Verify that all required outputs (`_trimmed.mp4`, `_edl.fcpxml`, `_edl.xml`, `_edl.json`, `_edl.csv`, `_edl_report.md`, `_edl_report.json`, `_words.json`, and `_sentences.json`) exist in `<OUTPUT_DIR>` (`<input_dir>/output/` by default) and are non-empty (`> 0 bytes`). Inspect the top-level `agent_verdict` in `_edl_report.json`.
+3. **Fail-Fast on Cloud Errors & One-Shot Self-Healing Protocol**:
+   - **Fail-Fast on Cloud/Auth Errors (Exit Code `1`)**: If any script exits with code `1` (e.g., missing ADC credentials, 403/401 GCS/Vertex AI/Cloud STT permission error, or missing FFmpeg), stop immediately, report the exact error and exit status, and instruct the user to run `./setup.sh --project YOUR_PROJECT_ID`, `gcloud auth application-default login`, or `pip install -r requirements.txt`. Never silently downgrade from `chirp3` to `whisper`.
+   - **One-Shot Self-Healing on Quality Gate Failure (Max 1 Retry)**: If `_edl_report.json` reports `agent_verdict.pass_quality_gate == false` (`suggested_action == "ONE_SHOT_REMEDIATE"`, or exit code `2` with `--strict`), execute **at most ONE** remediation re-run (`remediation_cmd`). If the second run still fails the quality gate, stop immediately and report `[Degraded]` along with `fatal_violations`.
+4. **Dynamic Language Mirroring & Strict Zero-Emoji Policy**:
+   - Respond to the user in their prompt language (Traditional Chinese `zh-TW` when prompted in Traditional Chinese, English when prompted in English, Japanese when prompted in Japanese, etc.).
+   - Do NOT use decorative emojis or icons in section headings, tables, or generated EDL reports.
+
+---
+
+## Part II: Repository Development & Engineering Standards (When Developing This Project)
+
+When modifying code, prompts, infrastructure scripts, or documentation in this repository, you MUST adhere to the following engineering standards:
+
+### 1. Single Source of Truth (SSOT) Directory Architecture
+- **Canonical Code Location**: All core Python scripts (`scripts/*.py`) and prompt templates (`prompts/*.md`) physically reside inside `skills/video-trimmer/scripts/` and `skills/video-trimmer/prompts/`.
+- **Rule**: Always edit files under `skills/video-trimmer/scripts/` and `skills/video-trimmer/prompts/`. Do not create root-level symlinks or duplicate physical directories at the repository root.
+
+### 2. 5-Layer Unified Architecture, Composite Sub-Span Backfill, Closed-Loop Micro-Window Repair, & Zero Semantic String-Matching Invariant
+- **Zero Python Semantic Retake Guessing**: Never use Python string-similarity heuristics (`difflib`, character overlap ratios, or regex keyword matching) in `skills/video-trimmer/scripts/transcribe.py` to classify semantic retakes or filter sentences. Semantic take arbitration belongs exclusively to the LLM in `skills/video-trimmer/prompts/video_cut_prompt.md`.
+- **Layer 1 — Dual-Engine Word-Level Acoustic Ground Truth & Pure Physical Clause Segmentation**:
+  - `transcribe_video_words` in `skills/video-trimmer/scripts/transcribe.py` extracts physical word timestamps (`0.001s` millisecond precision) via Google Cloud Speech-to-Text V2 `chirp_3` (`skills/video-trimmer/scripts/chirp3_asr.py`, default) or local `mlx-whisper` / `faster-whisper` (`--asr-engine whisper`, optional), caching engine-tagged `<basename>_words.json` and `<basename>_sentences.json`.
+  - `merge_whisper_segments_to_sentences` and `_split_sentence_on_paused_restarts` split `Sentence ID` units strictly on physical and universal punctuation boundaries (closure punctuation, clause commas with micro-pauses, breath pauses, stretched word onsets, and speaker turns) without language-specific conjunction or filler word lists.
+- **Layer 2 — Dual-Mode LLM Take Arbitration (`response_schema`), Last-Take-Anchored Composite Backfill, & Closed-Loop Micro-Window Repair**:
+  - `gemini_client.py`, `script_aligner.py`, `edl_occlusion.py`, and `video_cut_prompt.md` enforce structured `EDL_RESPONSE_SCHEMA` output, contiguous physical `sentence_ids` per clip, **Mode A** (Monotonic Script-Anchored Alignment via SSOT `extract_script_blocks` `[Script Block NN]`), and **Mode B** (Unscripted Intent-Window Arbitration), delegating semantic disambiguation (stutter vs. grammatical reduplication, retake vs. rhetorical parallelism, non-composite tail-head false starts) to the LLM while allowing **Partial Tail Pick-Up Backfill** (`composite_role: "prefix" -> "continuation"`) via `resolve_composite_prefix_occlusions` and recovering omitted opening/closing short clauses explicitly present in `transcript` via `_extend_omitted_adjacent_short_clauses`.
+  - Before `delete_gcs_blob`, `repair_edl_micro_windows`, `_detect_script_precision_anomalies`, and closed-loop post-alignment verification (`_expand_and_occlude_edl_clips` -> `detect_micro_window_anomalies`) in `skills/video-trimmer/scripts/edl_repair.py` evaluate script coverage (`_script_block_coverage_score`), detect duplicate script clauses (`SCRIPT_PHRASE_MULTIPLICITY`) and physical ASR alignment leaks (`UNSCRIPTED_EXTRANEOUS_SPAN`) while whitelisting legitimate script repetitions (`_count_fuzzy_script_occurrences`), coalesce overlapping anomalies into unified 15-to-90s windows via `VideoMetadata(start_offset=..., end_offset=...)`, stamp reviewed clips with `llm_verified_window`, and enforce `Right-to-Left Span Occlusion` on composite seams.
+- **Layer 3 — Sub-Unit Expansion, Intra-Token CJK Interpolation, & Mid-Sentence Stumble Excision**:
+  - `resolve_clip_sub_units` and `_extract_matched_word_spans_by_transcript` in `skills/video-trimmer/scripts/transcribe.py` expand multi-sentence spans, interpolate CJK multi-character intra-token cut boundaries (`_slice_words_on_char_span`), excise mid-sentence stumbles (`A + B_ng + B_ok + C`) into clean `prefix + continuation` sub-units, and enforce `0.001s` external word hard walls (`next_word_hard_wall`).
+- **Layer 4 — Global Cross-Clip Coalescing & Overlap Pivot Synchronization**:
+  - `coalesce_adjacent_sub_units` in `skills/video-trimmer/scripts/transcribe.py` merges consecutive `Sentence ID`s across adjacent non-composite clips when the physical inter-word gap is within the continuity threshold, while `_synchronize_composite_overlap_pivots` (`find_optimal_overlap_pivot` in `skills/video-trimmer/scripts/acoustic.py`) aligns shared composite seam words.
+- **Layer 5 — Deterministic Timeline Sanitization & 8-Dimension Quality Audit**:
+  - `sanitize_refined_edl` and `audit_edl_quality` in `skills/video-trimmer/scripts/edl_auditor.py` enforce strict chronological monotonicity (`source_in < source_out` and `c[i].source_out <= c[i+1].source_in`), cap plosive tail restoration at `next_word_hard_wall`, compute composite loudness compensation (`compute_composite_gain_db`), and generate `<base>_<tag>_edl_report.json` and `<base>_<tag>_edl_report.md` with a top-level `agent_verdict`.
+
+### 3. Multi-NLE Timeline Interoperability & Acoustic Integrity
+- **Universal NLE Support & Composite Markers**: `skills/video-trimmer/scripts/exporters.py` produces frame-accurate timelines for Apple Final Cut Pro (`.fcpxml` v1.9 DTD order: `<adjust-transform>` before `<marker>`), Adobe Premiere Pro (`.xml`), DaVinci Resolve (`.xml` / `.fcpxml`), and CSV (`.csv`), including `Composite Splice (Pick-up)` markers and optional `--punch-in-composite` (`1.12x`) scale transforms.
+- **Audio Pop Protection & Loudness Continuity**: Every rendered cut boundary in `skills/video-trimmer/scripts/render.py` applies an equal-power micro-fade (`curve=iqsin` and `curve=qsin`, governed by `CROSSFADE_DURATION_SEC` in `skills/video-trimmer/scripts/constants.py`) and bounded `volume` gain compensation on composite splices.
+- **Speech Boundary Tightening & Onset Clamping**: `skills/video-trimmer/scripts/acoustic.py` clamps inflated post-pause word starts (`clamp_post_pause_word_onset`) and dynamically calculates lead-in and lead-out margins (`40ms` compact margins on composite seams) without truncating spoken phonemes.
+
+### 4. 100% Google Cloud Vertex AI, Cloud STT V2 (ADC) + GCS Architecture
+- **Designated Models & Zero API Key Policy**: All cloud invocations in `skills/video-trimmer/scripts/gemini_client.py` and `skills/video-trimmer/scripts/chirp3_asr.py` authenticate via Application Default Credentials (ADC), defaulting to `MODEL_NAME=gemini-3.8-flash`, `GOOGLE_CLOUD_LOCATION=global`, `TRANSCRIBE_MODEL=chirp_3`, and `STT_LOCATION=us`. Never introduce non-designated model IDs or legacy AI Studio API keys.
+- **GCS Infrastructure & Ephemeral Staging (`setup.sh`)**: Raw videos (`gs://${BUCKET}/raw/`) and Chirp 3 audio slices (`gs://${BUCKET}/raw/chirp3_asr_*/`) are deleted in `finally` blocks after execution and backed by a 2-day bucket lifecycle deletion policy provisioned via `setup.sh` (`aiplatform.googleapis.com`, `speech.googleapis.com`, `storage.googleapis.com`, `drive.googleapis.com`, `iam.googleapis.com`, `iamcredentials.googleapis.com`).
+
+### 5. ASD-STE100 English, Strict Generality, & Unit Testing Gate
+- **ASD-STE100 & Zero Entity Hardcoding**: Write all Python code, docstrings, comments, and prompt templates in concise ASD-STE100 English. Use only generic placeholders (`raw_footage.mp4`, `shooting_script.md`, `rough_cut.fcpxml`) and never hardcode test-specific names or video titles.
+- **Mandatory Unit Test Gate**: Run the full unit test suite and verify 100% pass rate before committing any change:
+  ```bash
+  python3 -m unittest discover -s tests -v
+  ```
+
+### 6. Antigravity Plugin Architecture, 5-Language Parity, & Commit Policy
+- **Plugin & README Synchronization**: Keep `plugin.json`, `rules/AGENTS.md`, `.agents/rules/DEVELOPMENT.md`, `skills/video-trimmer/SKILL.md`, and all 5 language READMEs (`README.md`, `README.zh-TW.md`, `README.zh-CN.md`, `README.ja.md`, `README.ko.md`) synchronized at all times.
+- **Human Authorship Only**: Author all commits using the repository's configured human git user (`sylphlin`) with zero AI assistant branding or `Co-Authored-By` trailers.

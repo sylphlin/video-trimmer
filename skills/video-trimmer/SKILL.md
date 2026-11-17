@@ -23,9 +23,14 @@ This project complies with the [Agent Plugins 1.0 Specification](https://agent-p
 
 ```text
 video-trimmer/
-├── plugin.json                       # Agent Plugins 1.0 specification manifest
+├── plugin.json                       # Antigravity plugin manifest
+├── assets/
+│   └── logo.svg                      # Plugin vector icon
 ├── rules/
 │   └── AGENTS.md                     # Strict read-only & fail-fast operational invariants for AI clients
+├── .agents/
+│   └── rules/
+│       └── DEVELOPMENT.md            # Workspace & engineering development rules (ASD-STE100 English)
 ├── skills/
 │   └── video-trimmer/
 │       ├── SKILL.md                  # Skill definition and agent reference manual
@@ -47,7 +52,6 @@ video-trimmer/
 │       │   └── render.py             # ffprobe inspection & ffmpeg render with optional 1.12x punch-in
 │       └── prompts/                  # Canonical multimodal prompting specifications (SSOT)
 │           └── video_cut_prompt.md   # Dual-mode take arbitration & composite pick-up backfill prompt
-├── AGENTS.md                         # Workspace & engineering development rules (ASD-STE100 English)
 ├── README.md                         # Public GitHub README documentation
 ├── LICENSE                           # MIT License
 ├── .env.example                      # Environment variables template for Vertex AI, STT V2 & GCS
@@ -91,7 +95,7 @@ video-trimmer/
 ## Standard Agent Workflow (Autonomous Pipeline Execution)
 
 When an AI agent is instructed to rough-cut or trim a raw video, follow this protocol directly.
-Resolve `<PLUGIN_ROOT>` as the repository or plugin root located two levels above `skills/video-trimmer/SKILL.md` (`../../`, for example `/Users/sylph/.gemini/config/plugins/video-trimmer`).
+Resolve `<PLUGIN_ROOT>` as the repository or plugin root located two levels above `skills/video-trimmer/SKILL.md` (`../../`, for example `~/.gemini/config/plugins/video-trimmer`).
 Set the command working directory (`Cwd`) to `<PLUGIN_ROOT>` and invoke `python3 skills/video-trimmer/scripts/video_trimmer.py` directly. Do not search the filesystem with `find_by_name` or `list_dir` to locate the CLI entrypoint.
 
 ### Step 1: Environment Verification & GCP Native Setup

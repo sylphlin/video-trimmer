@@ -121,9 +121,14 @@ flowchart TD
 
 ```text
 video-trimmer/
-├── plugin.json                              # Agent Plugins 1.0 宣告清單
+├── plugin.json                              # Antigravity 外掛宣告清單
+├── assets/
+│   └── logo.svg                             # 外掛向量圖示
 ├── rules/
 │   └── AGENTS.md                            # 打包於 Plugin 內的客戶端執行期守則（唯讀與 Fail-Fast）
+├── .agents/
+│   └── rules/
+│       └── DEVELOPMENT.md                   # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── skills/
 │   └── video-trimmer/                       # 標準技能套件主幹（Single Source of Truth）
 │       ├── SKILL.md                         # 技能規範與 Agent 專用 CLI 參數參考手冊
@@ -145,7 +150,6 @@ video-trimmer/
 │       │   └── render.py                    # FFmpeg 微淡化、音量匹配與 1.12x 縮放硬體加速渲染
 │       └── prompts/                         # 提示詞規範實體目錄 (SSOT)
 │           └── video_cut_prompt.md          # 雙模式語意仲裁與局部補錄複合剪輯規範
-├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
 └── tests/                                   # 離線單元測試套件（155 項測試）
 ```

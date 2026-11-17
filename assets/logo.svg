@@ -1,0 +1,20 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="aiSpark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FDE047"/>
+      <stop offset="55%" stop-color="#FBBC04"/>
+      <stop offset="100%" stop-color="#EA580C"/>
+    </linearGradient>
+    <linearGradient id="vtGradA" x1="24" y1="40" x2="232" y2="216" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FB923C"/>
+      <stop offset="100%" stop-color="#E11D48"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="76" width="84" height="108" rx="20" fill="url(#vtGradA)"/>
+  <rect x="148" y="76" width="84" height="108" rx="20" fill="url(#vtGradA)"/>
+  <path d="M48 130L62 110L76 146L90 122" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M166 126L180 106L194 148L208 120" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="128" y1="34" x2="128" y2="222" stroke="#38BDF8" stroke-width="14" stroke-linecap="round"/>
+  <polygon points="110,34 146,34 128,58" fill="#38BDF8"/>
+  <path d="M 196.0 23.0 Q 202.4 39.6 219.0 46.0 Q 202.4 52.4 196.0 69.0 Q 189.6 52.4 173.0 46.0 Q 189.6 39.6 196.0 23.0 Z" fill="url(#aiSpark)"/>
+</svg>

@@ -121,9 +121,14 @@ Video rough-cutting and composite pick-up splicing require physical millisecond 
 
 ```text
 video-trimmer/
-├── plugin.json                              # Agent Plugins 1.0 manifest
+├── plugin.json                              # Antigravity plugin manifest
+├── assets/
+│   └── logo.svg                             # Plugin vector icon
 ├── rules/
 │   └── AGENTS.md                            # Packaged client execution invariants (read-only & fail-fast)
+├── .agents/
+│   └── rules/
+│       └── DEVELOPMENT.md                   # Workspace & engineering development rules (Part I & Part II)
 ├── skills/
 │   └── video-trimmer/                       # Canonical Skill Bundle (Single Source of Truth)
 │       ├── SKILL.md                         # Agent Skill specification & CLI options reference for AI agents
@@ -145,7 +150,6 @@ video-trimmer/
 │       │   └── render.py                    # FFmpeg micro-crossfade, gain match, and 1.12x punch-in render
 │       └── prompts/                         # Canonical prompt specifications (SSOT)
 │           └── video_cut_prompt.md          # Dual-mode take arbitration & composite pick-up prompt
-├── AGENTS.md                                # Workspace & engineering development rules (Part I & Part II)
 ├── README.md                                # English documentation
 ├── LICENSE                                  # MIT License
 ├── .env.example                             # Environment variables template for Vertex AI, STT V2, and GCS
