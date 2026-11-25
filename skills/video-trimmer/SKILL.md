@@ -1,6 +1,6 @@
 ---
 name: video-trimmer
-description: AI-Powered Smart Video Trimmer and rough-cut engine adhering to Agent Skills Specification. Features Gemini 3.8 Flash Multimodal Video Understanding (native video, Last-Take-Wins with Composite Pick-Up Backfill), Dual-Engine Word-Level Acoustic Ground Truth (Google Cloud Speech-to-Text V2 Chirp 3 default; Whisper optional), Acoustic Onset Snapping, 20ms Audio Equal-Power Micro-Crossfade, and multi-format NLE Project Export (Premiere Pro XML, DaVinci Resolve XML, Final Cut Pro FCPXML).
+description: AI-Powered Smart Video Trimmer and rough-cut engine adhering to Agent Skills Specification. Features Gemini 4 Hydrogen Multimodal Video Understanding (native video, Last-Take-Wins with Composite Pick-Up Backfill), Dual-Engine Word-Level Acoustic Ground Truth (Google Cloud Speech-to-Text V2 Chirp 3 default; Whisper optional), Acoustic Onset Snapping, 20ms Audio Equal-Power Micro-Crossfade, and multi-format NLE Project Export (Premiere Pro XML, DaVinci Resolve XML, Final Cut Pro FCPXML).
 metadata:
   version: "1.0.0"
   author: "sylphlin"
@@ -13,7 +13,7 @@ metadata:
 
 AI-Powered Smart Video Trimmer and rough-cut engine adhering to the open [Agent Skills Specification](https://agentskills.io/specification).
 
-Tailored for talking-head videos, tech explainers, video podcasts, tutorials, and multi-take raw footage. Combines **Gemini 3.8 Flash Multimodal Video Understanding**, **Last-Take-Anchored Composite Sub-Span Backfill**, and **Dual-Engine Word-Level Acoustic Ground Truth** (**Google Cloud Speech-to-Text V2 Chirp 3** by default; local `mlx-whisper` / `faster-whisper` optional), with **Acoustic Onset Snapping**, **Composite Loudness Gain Matching**, and **20ms Audio Equal-Power Micro-Crossfades**.
+Tailored for talking-head videos, tech explainers, video podcasts, tutorials, and multi-take raw footage. Combines **Gemini 4 Hydrogen Multimodal Video Understanding**, **Last-Take-Anchored Composite Sub-Span Backfill**, and **Dual-Engine Word-Level Acoustic Ground Truth** (**Google Cloud Speech-to-Text V2 Chirp 3** by default; local `mlx-whisper` / `faster-whisper` optional), with **Acoustic Onset Snapping**, **Composite Loudness Gain Matching**, and **20ms Audio Equal-Power Micro-Crossfades**.
 
 ---
 
@@ -46,7 +46,7 @@ video-trimmer/
 │       │   ├── edl_occlusion.py      # Right-to-Left Span Occlusion, short-clause recovery & deduplication
 │       │   ├── edl_repair.py         # Closed-loop anomaly detection & micro-window rescan repair
 │       │   ├── edl_auditor.py        # Monotonic timeline sanitization & 8-dimension quality audit
-│       │   ├── gemini_client.py      # Vertex AI (ADC) client & multimodal inference
+│       │   ├── gemini_client.py      # Vertex AI Gemini 4 Hydrogen (ADC) client & multimodal inference
 │       │   ├── gcs_utils.py          # Google Cloud Storage upload & ephemeral cleanup
 │       │   ├── exporters.py          # FCP7 XML / FCPXML v1.9 / CSV generation with composite markers
 │       │   └── render.py             # ffprobe inspection & ffmpeg render with optional 1.12x punch-in
@@ -65,15 +65,16 @@ video-trimmer/
 
 ## Key Capabilities & Architectural Pillars
 
-1. **Multimodal Native Understanding (Vertex AI Gemini 3.8 Flash)**:
+1. **Multimodal Native Understanding (Vertex AI Gemini 4 Hydrogen)**:
    - Stages raw footage directly to Google Cloud Storage (GCS) with automatic ephemeral lifecycle cleanup.
    - Evaluates presenter eye contact, facial expressions, stuttering, and retakes simultaneously via Vertex AI.
-2. **Dual-Mode Take Arbitration (`EDL_RESPONSE_SCHEMA`), Adjacent Short-Clause Recovery, & Composite Backfill**:
+2. **Layer 2 — Dual-Mode LLM Take Arbitration (`EDL_RESPONSE_SCHEMA`), Adjacent Short-Clause Recovery, & Composite Backfill (`gemini_client.py`)**:
+   - **Vertex AI Gemini 4 Hydrogen Inference (`gemini_client.py`)**: Invokes **Vertex AI Gemini 4 Hydrogen** (`MODEL_NAME=gemini-4-hydrogen`) via ADC on a unified `1M` token context window (`65,536` `max_output_tokens` cap). Runs in `MEDIA_RESOLUTION_LOW` mode and maps dynamic `thinking_level` (`low` / `medium` / `high`) via `resolve_thinking_level`.
    - Enforces structured `EDL_RESPONSE_SCHEMA` output with contiguous physical `Sentence ID` ranges per clip, and auto-recovers unclaimed adjacent opening/closing short clauses present in `transcript` (`_extend_omitted_adjacent_short_clauses`).
    - **Mode A (`--script`)**: Monotonic `[Script Block NN]` alignment keeping at most one winning take per script block.
    - **Mode B (No `--script`)**: Unscripted Intent-Window arbitration pruning abandoned fragments while preserving intentional rhetorical repetition.
    - **Partial Tail Pick-Up Backfill (`Right-to-Left Span Occlusion`)**: Keeps 100% `Last-Take-Wins` on full restarts, while automatically backfilling the missing opening prefix (`composite_role: "prefix"`) from the preceding attempt when the presenter only re-records a partial tail pick-up (`composite_role: "continuation"`, minimum `>= 0.55s` and `>= 4` CJK chars / `>= 3` Latin words) or excises a mid-sentence stumble (`A + B_ng + B_ok + C`).
-3. **Multimodal Active Speaker Diarization (Gemini 3.8 Flash)**:
+3. **Multimodal Active Speaker Diarization (Gemini 4 Hydrogen)**:
    - Evaluates on-camera visual cues (camera gaze, mouth articulatory sync, body language) and audio acoustics (close lavalier mic vs distant room echo).
    - Differentiates the on-screen presenter from off-screen crew cues (`Action`, `Scene 1`, `Take 2`) and between-take chatter.
 4. **Dual-Engine Word-Level Acoustic Ground Truth (Chirp 3 Default + Whisper Optional)**:
@@ -109,13 +110,13 @@ If Python or media dependencies are missing, run `pip install -r requirements.tx
 # 2. Authenticate once with Google Cloud ADC
 gcloud auth application-default login
 
-# 3. One-click automated GCP provisioning (Enables Vertex AI + Cloud STT V2 + GCS, creates bucket, SA, and .env):
+# 3. One-click automated GCP provisioning (Enables Vertex AI + Cloud STT V2 + GCS, creates bucket, SA, and .env with MODEL_NAME=gemini-4-hydrogen):
 ./setup.sh --project YOUR_PROJECT_ID
 ```
 
 ### Step 2: Execute Primary Video Trimmer Pipeline
 
-Default execution uses **Cloud STT V2 Chirp 3 (`--asr-engine chirp3`)** for word timestamps and fast **Static Multimodal mode (`MEDIA_RESOLUTION_LOW`)** for take arbitration, performs automatic surgical micro-window repair (`15s–90s` windows), and isolates all deliverables inside `<input_dir>/output/` (`./output/` for Google Drive links). Pass `--asr-engine whisper` ONLY when the user explicitly requests local Whisper ASR.
+Default execution uses **Vertex AI Gemini 4 Hydrogen** (`--model gemini-4-hydrogen`, `MEDIA_RESOLUTION_LOW`, unified `1M` token context window, `65,536` `max_output_tokens` cap, dynamic `thinking_level`) for take arbitration and **Cloud Speech-to-Text V2 `chirp_3`** (`--asr-engine chirp3`) for word timestamps. It runs automatic surgical micro-window repair (`15s–90s` windows) and isolates all deliverables inside `<input_dir>/output/` (`./output/` for Google Drive links). Pass `--asr-engine whisper` ONLY when the user explicitly requests local Whisper ASR.
 
 ```bash
 # Standard automatic rough-cut with Chirp 3 default ASR (outputs isolated in <input_dir>/output/, Cwd = <PLUGIN_ROOT>):
@@ -154,7 +155,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--whisper-model` | | `small` | Whisper model size when `--asr-engine whisper` is selected. |
 | `--language` | | `auto` | Spoken language code (`auto`, `zh-TW`, `zh-CN`, `en`, `ja`, `ko`). |
 | `--force` | | `False` | Bypass cached `<basename>_words.json` and force re-transcription. |
-| `--model` | `-m` | `gemini-3.8-flash` | Gemini model name (defaults to `$MODEL_NAME` or `gemini-3.8-flash`). |
+| `--model` | `-m` | `gemini-4-hydrogen` | Gemini model name (defaults to `$MODEL_NAME` or `gemini-4-hydrogen`). |
 | `--project` | | `None` | Google Cloud Project ID (defaults to `$GOOGLE_CLOUD_PROJECT` or ADC). |
 | `--region` | | `None` | Vertex AI location/region (defaults to `$GOOGLE_CLOUD_LOCATION` or `global`). |
 | `--bucket` | | `None` | GCS bucket for video and Chirp 3 audio staging (defaults to `$VIDEO_TRIMMER_BUCKET`). |

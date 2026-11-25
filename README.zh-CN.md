@@ -2,6 +2,8 @@
 
 [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/sylphlin/video-trimmer/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-brightgreen.svg)](https://www.python.org/)
+[![Cloud STT v2 Chirp 3](https://img.shields.io/badge/Cloud%20STT%20v2-Chirp%203-orange.svg)](https://cloud.google.com/speech-to-text)
+[![Gemini 4 Hydrogen](https://img.shields.io/badge/Gemini%204-Hydrogen-yellow.svg)](https://cloud.google.com/vertex-ai)
 [![Apple Silicon Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-orange.svg)]()
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-5.0+-red.svg)](https://ffmpeg.org/)
 
@@ -11,7 +13,7 @@
 
 ## 项目概览 (Overview)
 
-**Video Trimmer** 是面向口播视频、教程与演讲录像的 AI 自动粗剪引擎。系统结合 **Google Vertex AI Gemini 3.8 Flash** 多模态视频推理、**双引擎毫秒级逐字声学基准**（默认采用 Google Cloud Speech-to-Text V2 **Chirp 3** `0.001s` 精度；可选本地 **Whisper** `mlx-whisper` / `faster-whisper`）、**以最后一镜为基准的跨镜复合拼接（Last-Take-Anchored Composite Sub-Spans）**、**五层统一剪辑架构（5-Layer Unified Architecture）** 与 **声学起音锁定（Acoustic Onset Snapping）**。每次运行会自动剔除 NG 重录、句中口误与静音停顿，并在讲者仅补录后半句时自动回补上一镜的前半句，最后导出专业 NLE 时间线（`.xml`, `.fcpxml`, `.csv`）、8 维度质量审计报告（`.md`, `.json`）及渲染完成的 MP4 视频。
+**Video Trimmer** 是面向口播视频、教程与演讲录像的 AI 自动粗剪引擎。系统结合 **Google Vertex AI Gemini 4 Hydrogen** 多模态视频推理、**双引擎毫秒级逐字声学基准**（默认采用 Google Cloud Speech-to-Text V2 **Chirp 3** `0.001s` 精度；可选本地 **Whisper** `mlx-whisper` / `faster-whisper`）、**以最后一镜为基准的跨镜复合拼接（Last-Take-Anchored Composite Sub-Spans）**、**五层统一剪辑架构（5-Layer Unified Architecture）** 与 **声学起音锁定（Acoustic Onset Snapping）**。每次运行会自动剔除 NG 重录、句中口误与静音停顿，并在讲者仅补录后半句时自动回补上一镜的前半句，最后导出专业 NLE 时间线（`.xml`, `.fcpxml`, `.csv`）、8 维度质量审计报告（`.md`, `.json`）及渲染完成的 MP4 视频。
 
 ---
 
@@ -40,7 +42,7 @@ flowchart TD
     end
 
     subgraph L2["Layer 2: 双模式 LLM 语义择优与跨镜复合遮罩 (gemini_client / script_aligner / edl_occlusion / edl_repair)"]
-        MODE["Vertex AI Gemini 3.8 Flash 多模态视频理解<br/>• Mode A: 有讲稿单调锚定 [Script Block 01..NN]<br/>• Mode B: 无讲稿意图视窗仲裁 (剔除残句/保护排比)"]:::stage2Style
+        MODE["Vertex AI Gemini 4 Hydrogen 多模态视频理解<br/>• Mode A: 有讲稿单调锚定 [Script Block 01..NN]<br/>• Mode B: 无讲稿意图视窗仲裁 (剔除残句/保护排比)"]:::stage2Style
         REPAIR["局部微视窗重扫 & 由右至左跨镜区间遮罩<br/>(完整重念: Last-Take-Wins | 局部补录后半: 回补前缀 >=0.55s)"]:::stage2Style
         MODE --> REPAIR
     end
@@ -82,6 +84,7 @@ flowchart TD
    - **可选本地引擎 (`--asr-engine whisper`)**：在用户明确指定本地转录时，支持 `mlx-whisper`（Apple Silicon Metal）或 `faster-whisper`。
    - 仅依据物理边界切分 `Sentence ID`：换气停顿（`gap >= 0.20s` 及中日韩多字词自然换气 `>= 0.35s`）、吃螺丝拉长音起音（`word_dur >= 1.20s`）、句尾标点与说话人轮替，绝不在 Python 中使用字符串相似度猜测 NG 重录。
 2. **第二层：双模式 LLM 语义择优、相邻短子句自动补齐与闭环微视窗修复 (`gemini_client.py` / `script_aligner.py` / `edl_occlusion.py` / `edl_repair.py`)**：
+   - **Vertex AI Gemini 4 Hydrogen 推理引擎 (`gemini_client.py`)**：通过 ADC 调用 **Vertex AI Gemini 4 Hydrogen**（`MODEL_NAME=gemini-4-hydrogen`），采用统一 `1M` Token 上下文窗口（输出上限 `65,536` `max_output_tokens`）。默认以 `MEDIA_RESOLUTION_LOW` 模式运行，并通过 `resolve_thinking_level` 动态映射 `thinking_level`（`low` / `medium` / `high`）。
    - **结构化输出约束 (`EDL_RESPONSE_SCHEMA`)**：强制 Gemini 输出单调连续的物理 `Sentence ID` 范围，并支持**相邻短子句自动补齐**（`edl_occlusion.py` 中的 `_extend_omitted_adjacent_short_clauses`），自动找回模型在 `transcript` 中已保留但漏选 `Sentence ID` 的开头或结尾短子句。
    - **Mode A：有讲稿单调锚定模式（提供拍摄讲稿时）**：通过单一真相来源（SSOT）解析器（`script_aligner.py` 中的 `extract_script_blocks`）自动过滤 YAML Frontmatter、舞台指示与非口播元数据行，将口播台词格式化为 `[Script Block 01] .. [Script Block NN]`。整句重念时严格维持 `Last-Take-Wins`。
    - **Mode B：无讲稿意图视窗仲裁模式（未提供讲稿时）**：剔除未完成残句重录（Abandoned Fragment），同时保护刻意修辞排比强调。
@@ -96,7 +99,7 @@ flowchart TD
 6. **声学起音锁定、重叠切点同步、20 ms 微淡化与可选 1.12x 复合缩放遮瑕 (`acoustic.py` / `render.py`)**：
    - 修正停顿后虚胖起音（`clamp_post_pause_word_onset`）、在重叠词组的最低 RMS 能量谷同步切点（`find_optimal_overlap_pivot`）、匹配前后镜响度（`compute_composite_gain_db`），支持 Apple Silicon `VideoToolbox` 硬件加速、20 ms 等功率微淡化（`iqsin`/`qsin`）与可选 `--punch-in-composite`（`1.12x` 偶数像素裁剪放大遮瑕）。
 7. **Agent Plugins 1.0 标准架构与多平台 NLE 时间线导出 (`exporters.py`)**：
-   - 核心脚本与提示词位于 `skills/video-trimmer/scripts/`（含 `chirp3_asr.py`）与 `skills/video-trimmer/prompts/`（SSOT），支持导出带 `Composite Splice (Pick-up)` 时间线 `<marker>` 标记的 **FCP7 XML**、**FCPXML v1.9** 与 **CSV**，并通过全部 155 项离线单元测试。
+   - 核心脚本与提示词位于 `skills/video-trimmer/scripts/`（含 `gemini_client.py` Vertex AI Gemini 4 Hydrogen (ADC) 客户端与 `chirp3_asr.py`）与 `skills/video-trimmer/prompts/`（SSOT），支持导出带 `Composite Splice (Pick-up)` 时间线 `<marker>` 标记的 **FCP7 XML**、**FCPXML v1.9** 与 **CSV**，并通过全部 157 项离线单元测试。
 
 ---
 
@@ -135,7 +138,7 @@ pip install mlx-whisper
 
 ### 3. 认证 ADC 并配置 Google Cloud 资源 (`./setup.sh`)
 
-进入 `~/.gemini/config/plugins/video-trimmer` 执行 `setup.sh`，自动启用 Vertex AI、Cloud Speech-to-Text V2（`chirp_3`）与 Cloud Storage 并生成 `.env` 配置：
+进入 `~/.gemini/config/plugins/video-trimmer` 执行 `setup.sh`，自动启用 Vertex AI、Cloud Speech-to-Text V2（`chirp_3`）与 Cloud Storage，并在 `.env` 中配置 `MODEL_NAME=gemini-4-hydrogen`、`TRANSCRIBE_MODEL=chirp_3` 及 `STT_LOCATION=us`：
 
 ```bash
 gcloud auth application-default login
@@ -153,7 +156,7 @@ chmod +x setup.sh
 1. **极简指令（`/` 指定技能 + `@` 标记文件，推荐）**：输入 `/video-trimmer` 选择技能，并用 `@` 标记视频与讲稿文件，只需列出关键字段（如 `视频: @XX, 讲稿: @YY`），无需编写完整句子。
 2. **口语表达（自然语言自动触发）**：直接用日常口语描述剪辑需求，Antigravity 会自动识别意图并调用该 Plugin。
 
-系统默认使用云端 **Chirp 3** 转录引擎（`--asr-engine chirp3`），所有生成文件均会自动隔离保存至输入视频所在目录下的 `output/` 子目录（Google Drive 链接则为 `./output/`）。如需使用本地离线转录可指定 `ASR: whisper`；如需在跨镜补录切点自动微幅放大画面遮瑕，可开启 `--punch-in-composite`。
+**Video Trimmer** 默认采用 **Vertex AI Gemini 4 Hydrogen**（`--model gemini-4-hydrogen`）与 **Cloud Speech-to-Text V2 `chirp_3`**（`--asr-engine chirp3`），并将所有生成文件自动隔离保存至输入视频所在目录下的 `output/` 子目录（Google Drive 链接则为 `./output/`）。如需使用本地离线转录可指定 `ASR: whisper`；如需在跨镜补录切点自动微幅放大画面遮瑕，可开启 `--punch-in-composite`。
 
 ### 场景 1：有讲稿 / 大纲的录像粗剪（Mode A：讲稿锚定对齐）
 适用于已备妥拍摄脚本或口播大纲的录像。系统会自动过滤非口播标题，在整句重念时保留最后一镜（`Last-Take-Wins`），并在局部补录后半句时自动回补上一镜的前半句。

@@ -12,6 +12,7 @@ from scripts.gemini_client import (
     _extract_text_from_response,
     get_gemini_client,
     load_env_file,
+    resolve_thinking_level,
     run_gemini_inference,
     stage_video_to_gcs,
 )
@@ -106,6 +107,15 @@ class TestVertexClient(unittest.TestCase):
             self.assertTrue(is_ephemeral)
             mock_upload.assert_called_once()
 
+    def test_resolve_thinking_level(self):
+        self.assertEqual(resolve_thinking_level(1024), "low")
+        self.assertEqual(resolve_thinking_level(2048), "low")
+        self.assertEqual(resolve_thinking_level(2049), "medium")
+        self.assertEqual(resolve_thinking_level(3800), "medium")
+        self.assertEqual(resolve_thinking_level(4096), "medium")
+        self.assertEqual(resolve_thinking_level(4097), "high")
+        self.assertEqual(resolve_thinking_level(5120), "high")
+
     def test_run_gemini_inference_static(self):
         mock_client = MagicMock()
         mock_response = MagicMock()
@@ -122,7 +132,7 @@ class TestVertexClient(unittest.TestCase):
         raw_json, usage, duration = run_gemini_inference(
             client=mock_client,
             types_module=mock_types,
-            model="gemini-3.8-flash",
+            model="gemini-4-hydrogen",
             gcs_uri="gs://bucket/video.mp4",
             mime_type="video/mp4",
             prompt="test prompt",
@@ -132,12 +142,11 @@ class TestVertexClient(unittest.TestCase):
         self.assertEqual(raw_json, '{"final_edl": []}')
         self.assertEqual(usage["total_tokens"], 160)
         self.assertGreaterEqual(duration, 0.0)
-        mock_types.ThinkingConfig.assert_called_once_with(thinking_budget=3800)
+        mock_types.ThinkingConfig.assert_called_once_with(thinking_level="medium")
         mock_types.AutomaticFunctionCallingConfig.assert_called_once_with(disable=True)
         mock_types.GenerateContentConfig.assert_called_once_with(
             response_mime_type="application/json",
             response_schema=EDL_RESPONSE_SCHEMA,
-            temperature=0.0,
             max_output_tokens=65536,
             thinking_config=mock_types.ThinkingConfig.return_value,
             automatic_function_calling=mock_types.AutomaticFunctionCallingConfig.return_value,
@@ -158,7 +167,7 @@ class TestVertexClient(unittest.TestCase):
         raw_json, usage, duration = run_gemini_inference(
             client=mock_client,
             types_module=mock_types,
-            model="gemini-3.8-flash",
+            model="gemini-4-hydrogen",
             gcs_uri="gs://bucket/video.mp4",
             mime_type="video/mp4",
             prompt="test prompt",
@@ -171,8 +180,39 @@ class TestVertexClient(unittest.TestCase):
 
         self.assertEqual(raw_json, '{"final_edl": []}')
         self.assertEqual(usage["total_tokens"], 0)
-        mock_types.ThinkingConfig.assert_called_once_with(thinking_budget=3910)
+        mock_types.ThinkingConfig.assert_called_once_with(thinking_level="medium")
         mock_types.VideoMetadata.assert_called_once_with(start_offset="854s", end_offset="1382s")
+        mock_types.GenerateContentConfig.assert_called_once_with(
+            response_mime_type="application/json",
+            response_schema=EDL_RESPONSE_SCHEMA,
+            max_output_tokens=65536,
+            thinking_config=mock_types.ThinkingConfig.return_value,
+            automatic_function_calling=mock_types.AutomaticFunctionCallingConfig.return_value,
+            media_resolution=mock_types.MediaResolution.MEDIA_RESOLUTION_LOW,
+        )
+        mock_client.models.generate_content.assert_called_once()
+
+    def test_run_gemini_inference_legacy_3x_fallback(self):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"final_edl": []}'
+        mock_response.candidates = [MagicMock(finish_reason="STOP")]
+        mock_response.usage_metadata = None
+        mock_client.models.generate_content.return_value = mock_response
+
+        mock_types = MagicMock()
+
+        run_gemini_inference(
+            client=mock_client,
+            types_module=mock_types,
+            model="gemini-3-flash",
+            gcs_uri="gs://bucket/video.mp4",
+            mime_type="video/mp4",
+            prompt="test prompt",
+            agentic=False,
+        )
+
+        mock_types.ThinkingConfig.assert_called_once_with(thinking_budget=3800)
         mock_types.GenerateContentConfig.assert_called_once_with(
             response_mime_type="application/json",
             response_schema=EDL_RESPONSE_SCHEMA,
@@ -182,7 +222,6 @@ class TestVertexClient(unittest.TestCase):
             automatic_function_calling=mock_types.AutomaticFunctionCallingConfig.return_value,
             media_resolution=mock_types.MediaResolution.MEDIA_RESOLUTION_LOW,
         )
-        mock_client.models.generate_content.assert_called_once()
 
     def test_run_gemini_inference_max_tokens_raises(self):
         mock_client = MagicMock()
@@ -201,7 +240,7 @@ class TestVertexClient(unittest.TestCase):
             run_gemini_inference(
                 client=mock_client,
                 types_module=mock_types,
-                model="gemini-3.8-flash",
+                model="gemini-4-hydrogen",
                 gcs_uri="gs://bucket/video.mp4",
                 mime_type="video/mp4",
                 prompt="test prompt",

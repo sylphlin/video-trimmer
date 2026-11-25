@@ -4,7 +4,7 @@ video-trimmer (AI-Powered Smart Video Trimmer)
 ---------------------------------------------
 An end-to-end video rough-cut and trimming engine powered by:
 - Dual-engine word-level acoustic ground truth (Cloud STT V2 Chirp 3 default; Whisper optional)
-- Vertex AI Gemini 3.8 Flash multimodal video understanding, dual-mode take selection, and composite pick-up backfill
+- Vertex AI Gemini 4 Hydrogen multimodal video understanding, dual-mode take selection, and composite pick-up backfill
 - Acoustic onset snapping, post-pause onset clamping, and plosive tail defense
 - Adaptive noise floor tracking, composite loudness gain matching, and 20ms equal-power audio micro-crossfades
 - Export to Premiere Pro (.xml), DaVinci Resolve (.xml), Final Cut Pro (.fcpxml), CSV (.csv), and MP4.
@@ -853,7 +853,7 @@ def _run(args):
 def main():
     ensure_ffmpeg_in_path()
     load_env_file()
-    default_model = os.environ.get("MODEL_NAME") or os.environ.get("TRIMMER_MODEL") or "gemini-3.8-flash"
+    default_model = os.environ.get("MODEL_NAME") or os.environ.get("TRIMMER_MODEL") or "gemini-4-hydrogen"
     env_asr = (os.environ.get("ASR_ENGINE") or DEFAULT_ASR_ENGINE).strip().lower()
     default_asr = env_asr if env_asr in ("chirp3", "whisper") else DEFAULT_ASR_ENGINE
 

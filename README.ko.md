@@ -2,6 +2,8 @@
 
 [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/sylphlin/video-trimmer/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-brightgreen.svg)](https://www.python.org/)
+[![Cloud STT v2 Chirp 3](https://img.shields.io/badge/Cloud%20STT%20v2-Chirp%203-orange.svg)](https://cloud.google.com/speech-to-text)
+[![Gemini 4 Hydrogen](https://img.shields.io/badge/Gemini%204-Hydrogen-yellow.svg)](https://cloud.google.com/vertex-ai)
 [![Apple Silicon Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-orange.svg)]()
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-5.0+-red.svg)](https://ffmpeg.org/)
 
@@ -11,7 +13,7 @@
 
 ## 개요 (Overview)
 
-**Video Trimmer**는 토킹헤드 비디오, 튜토리얼 및 발표 녹화물을 위한 AI 자동 러프컷 및 트리밍 엔진입니다. **Google Vertex AI Gemini 3.8 Flash** 멀티모달 비디오 추론, **듀얼 엔진 단어 단위 음향 타임스탬프**(기본값: Google Cloud Speech-to-Text V2 **Chirp 3** `0.001s` 정밀도 / 선택 사항: 로컬 **Whisper** `mlx-whisper` / `faster-whisper`), **마지막 테이크 기준 복합 서브스팬 접합(Last-Take-Anchored Composite Sub-Spans)**, **5계층 통합 아키텍처(5-Layer Unified Architecture)** 및 **음향 온셋 스내핑(Acoustic Onset Snapping)**을 결합하여 NG 테이크, 문장 중간 말더듬, 무음 구간을 제거하고 부분 재녹음 시 앞부분을 자동으로 보완한 뒤 NLE 타임라인(`.xml`, `.fcpxml`, `.csv`), 8차원 품질 감사 보고서(`.md`, `.json`) 및 렌더링된 MP4 비디오를 생성합니다.
+**Video Trimmer**는 토킹헤드 비디오, 튜토리얼 및 발표 녹화물을 위한 AI 자동 러프컷 및 트리밍 엔진입니다. **Google Vertex AI Gemini 4 Hydrogen** 멀티모달 비디오 추론, **듀얼 엔진 단어 단위 음향 타임스탬프**(기본값: Google Cloud Speech-to-Text V2 **Chirp 3** `0.001s` 정밀도 / 선택 사항: 로컬 **Whisper** `mlx-whisper` / `faster-whisper`), **마지막 테이크 기준 복합 서브스팬 접합(Last-Take-Anchored Composite Sub-Spans)**, **5계층 통합 아키텍처(5-Layer Unified Architecture)** 및 **음향 온셋 스내핑(Acoustic Onset Snapping)**을 결합하여 NG 테이크, 문장 중간 말더듬, 무음 구간을 제거하고 부분 재녹음 시 앞부분을 자동으로 보완한 뒤 NLE 타임라인(`.xml`, `.fcpxml`, `.csv`), 8차원 품질 감사 보고서(`.md`, `.json`) 및 렌더링된 MP4 비디오를 생성합니다.
 
 ---
 
@@ -40,7 +42,7 @@ flowchart TD
     end
 
     subgraph L2["Layer 2: 듀얼 모드 LLM 중재 및 복합 스팬 오클루전 (gemini_client / script_aligner / edl_occlusion / edl_repair)"]
-        MODE["Vertex AI Gemini 3.8 Flash 멀티모달 비디오 추론<br/>• Mode A: 대본 기반 단조 정렬 [Script Block 01..NN]<br/>• Mode B: 무대본 의도 윈도우 중재"]:::stage2Style
+        MODE["Vertex AI Gemini 4 Hydrogen 멀티모달 비디오 추론<br/>• Mode A: 대본 기반 단조 정렬 [Script Block 01..NN]<br/>• Mode B: 무대본 의도 윈도우 중재"]:::stage2Style
         REPAIR["마이크로 윈도우 재스캔 & 우-좌 스팬 오클루전<br/>(전체 재발화: Last-Take-Wins | 후반부 부분 재녹음: 접두어 보완 >=0.55s)"]:::stage2Style
         MODE --> REPAIR
     end
@@ -82,6 +84,7 @@ flowchart TD
    - **선택적 로컬 엔진 (`--asr-engine whisper`)**: 사용자가 로컬 전사를 명시적으로 요청한 경우 `mlx-whisper` 또는 `faster-whisper`를 지원합니다.
    - 호흡 휴지(`gap >= 0.20s` 및 CJK 다자간 호흡 휴지 `>= 0.35s`), 발화 지연 장음(`word_dur >= 1.20s`), 문장 부호 종결, 화자 교체의 물리적 경계만으로 `Sentence ID`를 분할하며 Python 문자열 유사도 추측을 배제합니다.
 2. **계층 2: 듀얼 모드 LLM 테이크 중재, 인접 단문 자동 확장 및 폐루프 마이크로 윈도우 복구 (`gemini_client.py` / `script_aligner.py` / `edl_occlusion.py` / `edl_repair.py`)**:
+   - **Vertex AI Gemini 4 Hydrogen 추론 엔진 (`gemini_client.py`)**: ADC를 통해 **Vertex AI Gemini 4 Hydrogen**(`MODEL_NAME=gemini-4-hydrogen`)을 호출하며 통합 `1M` 토큰 컨텍스트 윈도우(`65,536` `max_output_tokens` 상한)를 사용합니다. `MEDIA_RESOLUTION_LOW` 모드로 실행되며 `resolve_thinking_level`을 통해 동적 `thinking_level`(`low` / `medium` / `high`)을 매핑합니다.
    - **구조화 스키마 제약 (`EDL_RESPONSE_SCHEMA`)**: 클립당 연속된 물리적 `Sentence ID` 범위를 강제하며, `transcript`에 포함되어 있으나 `Sentence ID`에서 누락된 인접 앞·뒤 짧은 절을 자동으로 보완(`edl_occlusion.py`의 `_extend_omitted_adjacent_short_clauses`)합니다.
    - **Mode A: 대본 기반 단조 정렬 (촬영 대본 제공 시)**: SSOT 파서(`script_aligner.py`의 `extract_script_blocks`)로 비발화 메타데이터 헤더를 제외하고 `[Script Block 01] .. [Script Block NN]`으로 구성하며, 문장 처음부터 다시 말한 경우 100% `Last-Take-Wins`를 적용합니다.
    - **Mode B: 무대본 의도 윈도우 중재 (대본 미제공 시)**: 미완성 조각(Abandoned Fragment)은 제거하고 의도적인 수사적 반복 강조는 보존합니다.
@@ -96,7 +99,7 @@ flowchart TD
 6. **음향 온셋 스내핑, 중첩 피벗 동기화, 20 ms 마이크로 페이드 및 선택적 1.12x 펀치인 (`acoustic.py` / `render.py`)**:
    - 휴지 후 부풀려진 단어 시작점 보정(`clamp_post_pause_word_onset`), 중첩 구간의 최소 RMS 에너지 지점 피벗 동기화(`find_optimal_overlap_pivot`), 음량 매칭(`compute_composite_gain_db`), Apple Silicon `VideoToolbox` 하드웨어 가속, 20 ms 등전력 마이크로 페이드 및 선택적 `--punch-in-composite`(복합 연속 클립 `1.12x` 짝수 픽셀 줌)를 수행합니다.
 7. **Agent Plugins 1.0 표준 아키텍처 및 멀티 NLE 타임라인 지원 (`exporters.py`)**:
-   - 핵심 스크립트(`chirp3_asr.py` 포함)와 프롬프트는 `skills/video-trimmer/`(SSOT)에 위치하며, `Composite Splice (Pick-up)` 타임라인 `<marker>`가 포함된 **FCP7 XML**, **FCPXML v1.9** 및 **CSV**를 내보냅니다(총 155개 오프라인 단위 테스트 통과).
+   - 핵심 스크립트(`gemini_client.py` Vertex AI Gemini 4 Hydrogen (ADC) 클라이언트 및 `chirp3_asr.py` 포함)와 프롬프트는 `skills/video-trimmer/`(SSOT)에 위치하며, `Composite Splice (Pick-up)` 타임라인 `<marker>`가 포함된 **FCP7 XML**, **FCPXML v1.9** 및 **CSV**를 내보냅니다(총 157개 오프라인 단위 테스트 통과).
 
 ---
 
@@ -135,7 +138,7 @@ pip install mlx-whisper
 
 ### 3. ADC 인증 및 Google Cloud 리소스 구성 (`./setup.sh`)
 
-`~/.gemini/config/plugins/video-trimmer` 디렉터리에서 `setup.sh`를 실행하여 Vertex AI, Cloud Speech-to-Text V2(`chirp_3`), Cloud Storage를 활성화하고 `.env` 파일을 생성합니다:
+`~/.gemini/config/plugins/video-trimmer` 디렉터리에서 `setup.sh`를 실행하여 Vertex AI, Cloud Speech-to-Text V2(`chirp_3`), Cloud Storage를 활성화하고 `MODEL_NAME=gemini-4-hydrogen`, `TRANSCRIBE_MODEL=chirp_3`, `STT_LOCATION=us`가 포함된 `.env` 파일을 구성합니다:
 
 ```bash
 gcloud auth application-default login
@@ -153,7 +156,7 @@ Antigravity에서는 다음 두 가지 방식으로 **Video Trimmer**를 사용�
 1. **간결한 명령어 입력 (`/` 스킬 선택 + `@` 파일 태그, 권장)**: `/video-trimmer`를 입력하여 플러그인을 선택하고 `@`로 파일을 태그합니다. `비디오: @XX, 대본: @YY`처럼 핵심 항목만 지정하면 긴 문장을 작성할 필요가 없습니다.
 2. **자연어 프롬프트 (자동 라우팅)**: 일상적인 대화체로 편집 요구 사항을 설명하면 Antigravity가 의도를 파악하여 자동으로 플러그인을 실행합니다.
 
-기본적으로 클라우드 **Chirp 3**(`--asr-engine chirp3`)를 사용하며, 모든 결과물은 원본 비디오 폴더 아래의 `output/` 하위 디렉터리(Google Drive 링크의 경우 `./output/`)에 격리 저장됩니다. 로컬 Whisper 전사가 필요한 경우 `ASR: whisper`를 지정하고, 복합 픽업 컷에 `1.12x` 줌을 적용하려면 `--punch-in-composite`를 사용할 수 있습니다.
+기본적으로 **Video Trimmer**는 **Vertex AI Gemini 4 Hydrogen**(`--model gemini-4-hydrogen`)과 **Cloud Speech-to-Text V2 `chirp_3`**(`--asr-engine chirp3`)를 사용하며, 모든 결과물을 원본 비디오 폴더 아래의 `output/` 하위 디렉터리(Google Drive 링크의 경우 `./output/`)에 격리 저장합니다. 로컬 Whisper 전사가 필요한 경우 `ASR: whisper`를 지정하고, 복합 픽업 컷에 `1.12x` 줌을 적용하려면 `--punch-in-composite`를 사용할 수 있습니다.
 
 ### 시나리오 1: 대본/아웃라인 기반 녹화본 러프컷 (Mode A: 대본 단조 정렬)
 촬영 대본이나 원고가 준비된 녹화본에 적합합니다. 비발화 제목을 필터링하고 전체 재발화 시 마지막 테이크(`Last-Take-Wins`)를 유지하며, 후반부만 부분 재녹음한 경우 이전 테이크에서 앞부분을 자동 보완합니다.

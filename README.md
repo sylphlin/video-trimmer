@@ -2,6 +2,8 @@
 
 [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/sylphlin/video-trimmer/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-brightgreen.svg)](https://www.python.org/)
+[![Cloud STT v2 Chirp 3](https://img.shields.io/badge/Cloud%20STT%20v2-Chirp%203-orange.svg)](https://cloud.google.com/speech-to-text)
+[![Gemini 4 Hydrogen](https://img.shields.io/badge/Gemini%204-Hydrogen-yellow.svg)](https://cloud.google.com/vertex-ai)
 [![Apple Silicon Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-orange.svg)]()
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-5.0+-red.svg)](https://ffmpeg.org/)
 
@@ -11,7 +13,7 @@
 
 ## Overview
 
-**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 3.8 Flash** multimodal video reasoning with **Dual-Engine Word-Level Acoustic Ground Truth** (Google Cloud Speech-to-Text V2 **Chirp 3** at `0.001 s` precision by default; local **Whisper** via `mlx-whisper` / `faster-whisper` optional), **Last-Take-Anchored Composite Sub-Spans**, a **5-Layer Unified Architecture**, and **Acoustic Onset Snapping**. Each run removes bad takes, mid-sentence stumbles, and dead air while salvaging partial pick-up takes, then exports NLE project timelines (`.xml`, `.fcpxml`, `.csv`), an 8-dimension quality audit report (`.md`, `.json`), and a rendered MP4 video.
+**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 4 Hydrogen** multimodal video reasoning with **Dual-Engine Word-Level Acoustic Ground Truth** (Google Cloud Speech-to-Text V2 **Chirp 3** at `0.001 s` precision by default; local **Whisper** via `mlx-whisper` / `faster-whisper` optional), **Last-Take-Anchored Composite Sub-Spans**, a **5-Layer Unified Architecture**, and **Acoustic Onset Snapping**. Each run removes bad takes, mid-sentence stumbles, and dead air while salvaging partial pick-up takes, then exports NLE project timelines (`.xml`, `.fcpxml`, `.csv`), an 8-dimension quality audit report (`.md`, `.json`), and a rendered MP4 video.
 
 ---
 
@@ -40,7 +42,7 @@ flowchart TD
     end
 
     subgraph L2["Layer 2: Dual-Mode LLM Arbitration & Composite Span Occlusion (gemini_client / script_aligner / edl_occlusion / edl_repair)"]
-        MODE["Vertex AI Gemini 3.8 Flash Multimodal Video Scan<br/>• Mode A: Script-Anchored Alignment [Script Block 01..NN]<br/>• Mode B: Unscripted Intent-Window Arbitration"]:::stage2Style
+        MODE["Vertex AI Gemini 4 Hydrogen Multimodal Video Scan<br/>• Mode A: Script-Anchored Alignment [Script Block 01..NN]<br/>• Mode B: Unscripted Intent-Window Arbitration"]:::stage2Style
         REPAIR["Micro-Window Rescan & Right-to-Left Span Occlusion<br/>(Full Restart: Last-Take-Wins | Partial Pick-Up: Prefix Backfill >=0.55s)"]:::stage2Style
         MODE --> REPAIR
     end
@@ -82,6 +84,7 @@ flowchart TD
    - **Optional Local Engine (`--asr-engine whisper`)**: Supports offline transcription via `mlx-whisper` (Apple Silicon Metal) or `faster-whisper` (CPU/CUDA) when requested by the user.
    - Splits `Sentence ID` units strictly on physical and universal punctuation boundaries: breath pauses (`gap >= 0.20 s`, comma-absorbed pauses `>= 0.22 s`, micro-paused clause commas `>= 0.18 s`, and multi-character CJK breath splits `>= 0.35 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), closure punctuation, and speaker turns, without language-specific conjunction or filler word lists. Python never guesses semantic retakes via string similarity.
 2. **Layer 2 — Dual-Mode LLM Take Arbitration, Adjacent Short-Clause Recovery, & Closed-Loop Micro-Window Repair (`gemini_client.py` / `script_aligner.py` / `edl_occlusion.py` / `edl_repair.py`)**:
+   - **Vertex AI Gemini 4 Hydrogen Inference (`gemini_client.py`)**: Invokes **Vertex AI Gemini 4 Hydrogen** (`MODEL_NAME=gemini-4-hydrogen`) via ADC on a unified `1M` token context window (`65,536` `max_output_tokens` cap). Runs in `MEDIA_RESOLUTION_LOW` mode and maps dynamic `thinking_level` (`low` / `medium` / `high`) via `resolve_thinking_level`.
    - **Structured Schema & Adjacent Short-Clause Auto-Extension**: Enforces `EDL_RESPONSE_SCHEMA` with contiguous physical `Sentence ID` ranges per clip, and auto-extends `sentence_ids` when an unclaimed adjacent opening or closing short clause is explicitly present in `transcript` (`_extend_omitted_adjacent_short_clauses` in `edl_occlusion.py`).
    - **Mode A: Monotonic Script-Anchored Alignment (With Shooting Script)**: Strips YAML frontmatter, stage directions, and metadata headers via `extract_script_blocks` (`script_aligner.py`, `[Script Block 01] .. [Script Block NN]`). Enforces `Last-Take-Wins` when the speaker restarts a block from the beginning.
    - **Mode B: Unscripted Intent-Window Arbitration (Without Script)**: Prunes abandoned fragments and false starts while preserving intentional rhetorical repetition.
@@ -144,7 +147,7 @@ video-trimmer/
 │       │   ├── edl_occlusion.py             # Span occlusion, short-clause recovery, and clip deduplication
 │       │   ├── edl_repair.py                # Closed-loop anomaly detector and micro-window rescan repair
 │       │   ├── edl_auditor.py               # Monotonic timeline sanitizer and 8-dimension quality auditor
-│       │   ├── gemini_client.py             # Vertex AI (ADC) client and dual-mode prompt builder
+│       │   ├── gemini_client.py             # Vertex AI Gemini 4 Hydrogen (ADC) client and dual-mode prompt builder
 │       │   ├── gcs_utils.py                 # Cloud Storage staging, Google Drive cache, and CJK recovery
 │       │   ├── exporters.py                 # FCP7 XML, FCPXML v1.9, and CSV exporters with splice markers
 │       │   └── render.py                    # FFmpeg micro-crossfade, gain match, and 1.12x punch-in render
@@ -156,7 +159,7 @@ video-trimmer/
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python and static-ffmpeg dependencies
-└── tests/                                   # Offline unit test suite (155 tests)
+└── tests/                                   # Offline unit test suite (157 tests)
 ```
 
 ---
@@ -182,7 +185,7 @@ pip install mlx-whisper
 
 ### 3. Authenticate ADC and Provision Google Cloud Resources (`./setup.sh`)
 
-Run `setup.sh` inside `~/.gemini/config/plugins/video-trimmer` to enable Vertex AI, Cloud Speech-to-Text V2 (`chirp_3`), and Cloud Storage, and configure Application Default Credentials (ADC) using native `gcloud` commands:
+Run `setup.sh` inside `~/.gemini/config/plugins/video-trimmer` to enable Vertex AI, Cloud Speech-to-Text V2 (`chirp_3`), and Cloud Storage using native `gcloud` commands. The script configures Application Default Credentials (ADC) and writes `.env` defaults including `MODEL_NAME=gemini-4-hydrogen`, `TRANSCRIBE_MODEL=chirp_3`, and `STT_LOCATION=us`:
 
 ```bash
 gcloud auth application-default login
@@ -200,7 +203,7 @@ You can operate **Video Trimmer** in Antigravity using two interaction modes:
 1. **Concise `/skill` + `@file` Invocation (Recommended)**: Type `/video-trimmer` to select the plugin and tag your files with `@`. Specify only the key parameters (for example, `Video: @XX, Script: @YY`) without writing full sentences.
 2. **Natural Language Prompt (Auto-Routed)**: Describe your editing goal in plain conversational language. Antigravity automatically selects and runs this plugin.
 
-By default, **Video Trimmer** uses Cloud Speech-to-Text V2 `chirp_3` (`--asr-engine chirp3`) and isolates all generated deliverables in the `output/` subdirectory next to the input video (`./output/` for Google Drive links). Pass `ASR: whisper` only when you explicitly want local Whisper transcription, or add `Punch-in: true` (`--punch-in-composite`) to apply a `1.12x` framing zoom on composite pick-up cuts.
+By default, **Video Trimmer** uses **Vertex AI Gemini 4 Hydrogen** (`--model gemini-4-hydrogen`) and **Cloud Speech-to-Text V2 `chirp_3`** (`--asr-engine chirp3`), and isolates all generated deliverables in the `output/` subdirectory next to the input video (`./output/` for Google Drive links). Pass `ASR: whisper` only when you explicitly want local Whisper transcription. Add `Punch-in: true` (`--punch-in-composite`) to apply a `1.12x` framing zoom on composite pick-up cuts.
 
 ### Scenario 1: Script-Guided Recording Rough-Cut (Mode A: Monotonic Script-Anchored Alignment)
 Use this scenario when you have a shooting script or outline. The agent strips non-spoken metadata headers, aligns every spoken block in order, enforces `Last-Take-Wins` on full restarts, and automatically backfills missing prefixes on partial pick-up takes.
@@ -276,7 +279,7 @@ For an input video `raw_footage.mp4`, the agent automatically creates an `output
 
 ## Unit Testing
 
-Run the offline test suite (155 tests) before committing changes:
+Run the offline test suite (157 tests) before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v

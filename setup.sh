@@ -337,7 +337,7 @@ STT_LOCATION=us
 TRANSCRIBE_MODEL=chirp_3
 
 # Default Multimodal Model
-MODEL_NAME=gemini-3.8-flash
+MODEL_NAME=gemini-4-hydrogen
 EOF
         echo "    [✓] Created new .env file with configured values."
     else
@@ -369,7 +369,7 @@ if "STT_LOCATION=" not in content:
 if "TRANSCRIBE_MODEL=" not in content:
     content += "\nTRANSCRIBE_MODEL=chirp_3"
 if "MODEL_NAME=" not in content:
-    content += "\nMODEL_NAME=gemini-3.8-flash"
+    content += "\nMODEL_NAME=gemini-4-hydrogen"
 
 with open(env_path, "w", encoding="utf-8") as f:
     f.write(content.strip() + "\n")

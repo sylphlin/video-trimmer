@@ -2,6 +2,8 @@
 
 [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/sylphlin/video-trimmer/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-brightgreen.svg)](https://www.python.org/)
+[![Cloud STT v2 Chirp 3](https://img.shields.io/badge/Cloud%20STT%20v2-Chirp%203-orange.svg)](https://cloud.google.com/speech-to-text)
+[![Gemini 4 Hydrogen](https://img.shields.io/badge/Gemini%204-Hydrogen-yellow.svg)](https://cloud.google.com/vertex-ai)
 [![Apple Silicon Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-orange.svg)]()
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-5.0+-red.svg)](https://ffmpeg.org/)
 
@@ -11,7 +13,7 @@
 
 ## 概要 (Overview)
 
-**Video Trimmer** は、トーク動画、チュートリアル、プレゼンテーション録画向けの AI 自動ラフカット＆トリミングエンジンです。**Google Vertex AI Gemini 3.8 Flash** のマルチモーダル動画推論、**デュアルエンジン単語レベル音響グラウンドトゥルース**（デフォルトは Google Cloud Speech-to-Text V2 **Chirp 3** `0.001s` ミリ秒精度、オプションでローカル **Whisper** `mlx-whisper` / `faster-whisper`）、**最終テイク基準の複合サブスパン結合（Last-Take-Anchored Composite Sub-Spans）**、**5 レイヤー統合アーキテクチャ**、および **音響オンセット・スナッピング** を組み合わせ、NG テイクや文中の言い淀み、無音区間を除去しながら部分的なピックアップ録音の先頭補完も行い、NLE タイムライン（`.xml`, `.fcpxml`, `.csv`）、8 次元品質監査レポート（`.md`, `.json`）、および MP4 動画を出力します。
+**Video Trimmer** は、トーク動画、チュートリアル、プレゼンテーション録画向けの AI 自動ラフカット＆トリミングエンジンです。**Google Vertex AI Gemini 4 Hydrogen** のマルチモーダル動画推論、**デュアルエンジン単語レベル音響グラウンドトゥルース**（デフォルトは Google Cloud Speech-to-Text V2 **Chirp 3** `0.001s` ミリ秒精度、オプションでローカル **Whisper** `mlx-whisper` / `faster-whisper`）、**最終テイク基準の複合サブスパン結合（Last-Take-Anchored Composite Sub-Spans）**、**5 レイヤー統合アーキテクチャ**、および **音響オンセット・スナッピング** を組み合わせ、NG テイクや文中の言い淀み、無音区間を除去しながら部分的なピックアップ録音の先頭補完も行い、NLE タイムライン（`.xml`, `.fcpxml`, `.csv`）、8 次元品質監査レポート（`.md`, `.json`）、および MP4 動画を出力します。
 
 ---
 
@@ -40,7 +42,7 @@ flowchart TD
     end
 
     subgraph L2["Layer 2: デュアルモード LLM 調停＆複合スパン遮蔽 (gemini_client / script_aligner / edl_occlusion / edl_repair)"]
-        MODE["Vertex AI Gemini 3.8 Flash マルチモーダル動画理解<br/>• Mode A: 台本アンカー単調アライメント [Script Block 01..NN]<br/>• Mode B: 台本なしインテントウィンドウ調停"]:::stage2Style
+        MODE["Vertex AI Gemini 4 Hydrogen マルチモーダル動画理解<br/>• Mode A: 台本アンカー単調アライメント [Script Block 01..NN]<br/>• Mode B: 台本なしインテントウィンドウ調停"]:::stage2Style
         REPAIR["マイクロウィンドウ再スキャン＆右から左へのスパン遮蔽<br/>(全文言い直し: Last-Take-Wins | 後半のみ録り直し: 先頭補完 >=0.55s)"]:::stage2Style
         MODE --> REPAIR
     end
@@ -82,6 +84,7 @@ flowchart TD
    - **任意ローカルエンジン (`--asr-engine whisper`)**：ユーザーが明示的にローカル転写を指定した場合のみ、`mlx-whisper` または `faster-whisper` を使用します。
    - 息継ぎ休止（`gap >= 0.20s` および CJK 複数文字トークン間の呼吸休止 `>= 0.35s`）、長音化（`word_dur >= 1.20s`）、句読点、話者交替のみで `Sentence ID` を分割し、Python 側の文字列類似度によるリテイク推測は一切行いません。
 2. **レイヤー 2：デュアルモード LLM テイク選定、隣接短節の自動補完＆閉ループ微細ウィンドウ修復 (`gemini_client.py` / `script_aligner.py` / `edl_occlusion.py` / `edl_repair.py`)**：
+   - **Vertex AI Gemini 4 Hydrogen 推論エンジン (`gemini_client.py`)**：ADC 経由で **Vertex AI Gemini 4 Hydrogen**（`MODEL_NAME=gemini-4-hydrogen`）を呼び出し、統合 `1M` トークンコンテキストウィンドウ（出力上限 `65,536` `max_output_tokens`）で処理します。`MEDIA_RESOLUTION_LOW` モードで動作し、`resolve_thinking_level` により動的な `thinking_level`（`low` / `medium` / `high`）をマッピングします。
    - **構造化スキーマ制約 (`EDL_RESPONSE_SCHEMA`)**：各クリップに連続した物理 `Sentence ID` 範囲を強制し、`transcript` に含まれている未選択の先頭・末尾短節を自動補完（`edl_occlusion.py` の `_extend_omitted_adjacent_short_clauses`）します。
    - **Mode A：スクリプトアンカー単調アライメント（台本指定時）**：SSOT パーサー（`script_aligner.py` の `extract_script_blocks`）で非発話見出しを除外して `[Script Block 01] .. [Script Block NN]` に整形し、文頭からの言い直しには 100% `Last-Take-Wins` を適用します。
    - **Mode B：台本なしインテントウィンドウ調停（台本省略時）**：途中放棄された断片を除去しつつ、意図的な反復強調表現を保護します。
@@ -96,7 +99,7 @@ flowchart TD
 6. **音響オンセット固定、重複ピボット同期、20 ms マイクロフェード＆任意 1.12x パンチイン (`acoustic.py` / `render.py`)**：
    - 休止後の膨張した語頭タイムスタンプ補正（`clamp_post_pause_word_onset`）、重複フレーズ内の最小 RMS エネルギー谷での切替同期（`find_optimal_overlap_pivot`）、ラウドネス整合（`compute_composite_gain_db`）、Apple Silicon `VideoToolbox` 高速出力、20 ms 等パワーマイクロフェード、および任意の `--punch-in-composite`（複合継続クリップへの `1.12x` 偶数ピクセルズーム）を実行します。
 7. **Agent Plugins 1.0 準拠構造とマルチ NLE タイムライン出力 (`exporters.py`)**：
-   - コアスクリプト（`chirp3_asr.py` を含む）とプロンプトは `skills/video-trimmer/` 配下（SSOT）に配置され、`Composite Splice (Pick-up)` タイムライン `<marker>` 付きの **FCP7 XML**、**FCPXML v1.9**、**CSV** を出力します（全 155 件のオフライン単体テスト合格）。
+   - コアスクリプト（`gemini_client.py` Vertex AI Gemini 4 Hydrogen (ADC) クライアントおよび `chirp3_asr.py` を含む）とプロンプトは `skills/video-trimmer/` 配下（SSOT）に配置され、`Composite Splice (Pick-up)` タイムライン `<marker>` 付きの **FCP7 XML**、**FCPXML v1.9**、**CSV** を出力します（全 157 件のオフライン単体テスト合格）。
 
 ---
 
@@ -135,7 +138,7 @@ pip install mlx-whisper
 
 ### 3. ADC 認証と Google Cloud リソースの構成 (`./setup.sh`)
 
-`~/.gemini/config/plugins/video-trimmer` 内で `setup.sh` を実行し、Vertex AI、Cloud Speech-to-Text V2（`chirp_3`）、および Cloud Storage を有効化して `.env` を生成します：
+`~/.gemini/config/plugins/video-trimmer` 内で `setup.sh` を実行し、Vertex AI、Cloud Speech-to-Text V2（`chirp_3`）、および Cloud Storage を有効化して、`MODEL_NAME=gemini-4-hydrogen`、`TRANSCRIBE_MODEL=chirp_3`、`STT_LOCATION=us` を含む `.env` を構成します：
 
 ```bash
 gcloud auth application-default login
@@ -153,7 +156,7 @@ Antigravity では、以下の 2 つの方法で **Video Trimmer** を操作で�
 1. **簡潔なコマンド指定（`/` でスキル選択 + `@` でファイル指定、推奨）**：`/video-trimmer` を入力してプラグインを選択し、`@` でファイルを添付します。`動画: @XX, 台本: @YY` のように主要項目だけを指定すれば、文章を書く必要はありません。
 2. **自然言語プロンプト（自動ルーティング）**：日常の言葉で編集内容を指示すると、Antigravity が自動的にこのプラグインを選択して実行します。
 
-デフォルトではクラウド **Chirp 3**（`--asr-engine chirp3`）を使用し、すべての成果物は入力動画の親ディレクトリ配下の `output/` サブディレクトリ（Google Drive リンクの場合は `./output/`）に保存されます。ローカル Whisper を使用する場合は `ASR: whisper`、複合ピックアップ接続に `1.12x` ズームを適用する場合は `--punch-in-composite` を指定できます。
+デフォルトでは **Video Trimmer** は **Vertex AI Gemini 4 Hydrogen**（`--model gemini-4-hydrogen`）と **Cloud Speech-to-Text V2 `chirp_3`**（`--asr-engine chirp3`）を使用し、すべての成果物を入力動画の親ディレクトリ配下の `output/` サブディレクトリ（Google Drive リンクの場合は `./output/`）に保存します。ローカル Whisper を使用する場合は `ASR: whisper`、複合ピックアップ接続に `1.12x` ズームを適用する場合は `--punch-in-composite` を指定できます。
 
 ### シナリオ 1：台本・構成案に基づく動画ラフカット（Mode A：台本アンカーアライメント）
 撮影台本や原稿がある録画に最適です。非発話見出しを自動除外し、全文言い直しでは最終テイク（`Last-Take-Wins`）を採用し、後半のみのピックアップ録音では前のテイクから先頭部分を自動補完します。

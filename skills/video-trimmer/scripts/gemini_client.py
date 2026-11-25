@@ -445,6 +445,15 @@ def calculate_dynamic_thinking_budget(num_sentences: int, video_duration_seconds
     return max(1024, min(target_budget, 5120))
 
 
+def resolve_thinking_level(thinking_budget: int) -> str:
+    """Map a dynamic thinking token budget to a Gemini 4 thinking level."""
+    if thinking_budget <= 2048:
+        return "low"
+    if thinking_budget <= 4096:
+        return "medium"
+    return "high"
+
+
 def merge_chunked_edl(chunk_edl_results: list[dict], project_title: str) -> dict:
     """
     Merge multiple chunk EDL results into a single project EDL.
@@ -510,26 +519,44 @@ def run_gemini_inference(
 
     video_part = types_module.Part(**part_kwargs)
 
+    is_gemini_4 = "gemini-4" in str(model).lower()
     config_kwargs = {
         "response_mime_type": "application/json",
         "response_schema": EDL_RESPONSE_SCHEMA,
-        "temperature": 0.0,
         "max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
     }
-    if hasattr(types_module, "ThinkingConfig"):
-        config_kwargs["thinking_config"] = types_module.ThinkingConfig(thinking_budget=dynamic_budget)
+    if is_gemini_4:
+        thinking_level = resolve_thinking_level(dynamic_budget)
+        if hasattr(types_module, "ThinkingConfig"):
+            config_kwargs["thinking_config"] = types_module.ThinkingConfig(thinking_level=thinking_level)
+    else:
+        config_kwargs["temperature"] = 0.0
+        if hasattr(types_module, "ThinkingConfig"):
+            config_kwargs["thinking_config"] = types_module.ThinkingConfig(thinking_budget=dynamic_budget)
+
     if hasattr(types_module, "AutomaticFunctionCallingConfig"):
         config_kwargs["automatic_function_calling"] = types_module.AutomaticFunctionCallingConfig(disable=True)
     if target_res is not None:
         config_kwargs["media_resolution"] = target_res
 
-    logger.info(
-        "    [Gemini Inference] Mode: %s | Resolution: %s | Thinking budget: %d tokens%s",
-        "AGENTIC" if agentic else "STATIC",
-        target_res.value if hasattr(target_res, "value") else str(target_res),
-        dynamic_budget,
-        f" | Window: {start_offset}~{end_offset}" if (start_offset and end_offset) else "",
-    )
+    window_suffix = f" | Window: {start_offset}~{end_offset}" if (start_offset and end_offset) else ""
+    res_label = target_res.value if hasattr(target_res, "value") else str(target_res)
+    if is_gemini_4:
+        logger.info(
+            "    [Gemini Inference] Mode: %s | Resolution: %s | Thinking level: %s%s",
+            "AGENTIC" if agentic else "STATIC",
+            res_label,
+            thinking_level,
+            window_suffix,
+        )
+    else:
+        logger.info(
+            "    [Gemini Inference] Mode: %s | Resolution: %s | Thinking budget: %d tokens%s",
+            "AGENTIC" if agentic else "STATIC",
+            res_label,
+            dynamic_budget,
+            window_suffix,
+        )
 
     t0 = time.time()
     try:
